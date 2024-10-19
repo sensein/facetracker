@@ -24,7 +24,7 @@ packages = [{include = "facetracker"}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
-click = "^9.1.2"
+click = "^8.1.7"
 numpy = "^1.26.4"
 opencv-python = "^4.10.0"
 torch = "^2.2.2"
