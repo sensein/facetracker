@@ -1,5 +1,8 @@
+"""Module for face embedding and clustering operations."""
+
 import os
-from typing import Dict, List, Tuple, Any, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import cv2
 import networkx as nx
 import numpy as np
@@ -10,7 +13,19 @@ from tqdm import tqdm
 
 
 class FaceEmbedder:
-    def __init__(self, model=None, device=None):
+    """Class for generating face embeddings from images."""
+
+    def __init__(
+        self,
+        model: Optional[InceptionResnetV1] = None,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        """Initialize the FaceEmbedder.
+
+        Args:
+            model: Pre-trained face recognition model.
+            device: Computation device (CPU or GPU).
+        """
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
@@ -18,7 +33,7 @@ class FaceEmbedder:
             self.device
         )
 
-    def load_image(self, image_path):
+    def load_image(self, image_path: str) -> torch.Tensor:
         """Load an image from disk and convert it to a tensor."""
         image = cv2.imread(image_path)
         if image is None:
@@ -28,8 +43,8 @@ class FaceEmbedder:
         face_tensor = self.preprocess_face(image)
         return face_tensor
 
-    def preprocess_face(self, face_image):
-        """Preprocess the face image for embedding extraction (resize, normalize, etc.)."""
+    def preprocess_face(self, face_image: np.ndarray) -> torch.Tensor:
+        """Preprocess the face image for embedding extraction."""
         face_image = cv2.resize(
             face_image, (160, 160)
         )  # Resize to 160x160 pixels if required
@@ -43,7 +58,9 @@ class FaceEmbedder:
         face_tensor = (face_tensor - 127.5) / 128.0  # Normalize
         return face_tensor
 
-    def get_face_embeddings(self, selected_frames, image_dir):
+    def get_face_embeddings(
+        self, selected_frames: Dict[str, List[Dict[str, Any]]], image_dir: str
+    ) -> List[Dict[str, Any]]:
         """Get embeddings for each cropped face image."""
         face_embeddings = []
 
@@ -74,7 +91,7 @@ class FaceEmbedder:
                             "scene_id": scene_id,
                             "unique_face_id": face_data["unique_face_id"],
                             "global_face_id": face_data["global_face_id"],
-                            "embeddings": embeddings,  # Each embedding with its image path
+                            "embeddings": embeddings,
                         }
                     )
 
@@ -85,12 +102,33 @@ class FaceEmbedder:
 
 
 class FaceClusterer:
-    def __init__(self, similarity_threshold: float = 0.6, max_iterations: int = 100):
+    """Class for clustering face embeddings using Chinese Whispers algorithm."""
+
+    def __init__(
+        self, similarity_threshold: float = 0.6, max_iterations: int = 100
+    ) -> None:
+        """Initialize the FaceClusterer.
+
+        Args:
+            similarity_threshold: Threshold for considering two faces similar.
+            max_iterations: Maximum number of iterations for Chinese Whispers.
+        """
         self.similarity_threshold = similarity_threshold
         self.max_iterations = max_iterations
 
-    def build_graph(self, face_embeddings):
-        """Builds a graph where nodes represent embeddings, and edges represent similarities."""
+    def build_graph(
+        self, face_embeddings: List[Dict[str, Any]]
+    ) -> Tuple[nx.Graph, List[Any]]:
+        """Build a graph of embeddings and similarities.
+
+        Nodes represent embeddings, and edges represent similarities.
+
+        Args:
+            face_embeddings: List of face embedding data.
+
+        Returns:
+            The constructed graph and node data.
+        """
         G = nx.Graph()
 
         # Flatten embeddings with identifiers into node_data
@@ -136,9 +174,20 @@ class FaceClusterer:
 
         return G, node_data
 
-    def apply_chinese_whispers(self, G: nx.Graph) -> dict:
-        """Runs the Chinese Whispers algorithm on the similarity graph with convergence check."""
-        labels = {node: i for i, node in enumerate(G.nodes())}
+    def apply_chinese_whispers(self, G: nx.Graph) -> Dict[Any, int]:
+        """Apply the Chinese Whispers algorithm to cluster the graph.
+
+        This method implements the Chinese Whispers algorithm, an approach to
+        graph-based clustering. It iteratively updates node labels based on
+        the most common label among their neighbors.
+
+        Args:
+            G (nx.Graph): The input graph to be clustered.
+
+        Returns:
+            Dict[Any, int]: A dictionary mapping each node to its cluster label.
+        """
+        labels: Dict[Any, int] = {node: i for i, node in enumerate(G.nodes())}
 
         with tqdm(
             total=self.max_iterations, desc="Running Chinese Whispers", unit="iteration"
@@ -154,12 +203,11 @@ class FaceClusterer:
                     ]
                     if neighbor_labels:
                         label_counts = np.bincount(neighbor_labels)
-                        most_common_label = np.argmax(label_counts)
+                        most_common_label = int(np.argmax(label_counts))
                         if labels[node] != most_common_label:
                             labels[node] = most_common_label
                             labels_changed = True
 
-                # Check for convergence
                 if not labels_changed:
                     print(f"Converged after {iteration + 1} iterations.")
                     break
@@ -169,7 +217,7 @@ class FaceClusterer:
         return labels
 
     def consolidate_clusters(self, initial_clusters: dict) -> dict:
-        """Consolidate clusters by assigning each face to the best cluster among its initial assignments."""
+        """Consolidate clusters by assigning each face to the best cluster."""
         # Map to hold the best cluster assignment for each unique_face_id
         face_best_assignment: Dict[str, int] = {}
         face_embeddings: Dict[str, List[np.ndarray]] = {}
@@ -193,7 +241,8 @@ class FaceClusterer:
                 cluster_id for cluster_id, _ in face_data_map[unique_face_id]
             )
             print(
-                f"Unique Face ID: {unique_face_id}, Assigned Clusters: {assigned_clusters}"
+                f"Unique Face ID: {unique_face_id}, "
+                f"Assigned Clusters: {assigned_clusters}"
             )
 
             best_cluster_id: Union[int, None] = None
@@ -232,7 +281,7 @@ class FaceClusterer:
                             1, -1
                         )
 
-                    # Step 3: Compute average similarity between face embeddings and cluster embeddings
+                    # Step 3: Compute average similarity
                     similarities = 1 - cdist(
                         embeddings_array, cluster_embeddings_array, "cosine"
                     )
@@ -260,9 +309,19 @@ class FaceClusterer:
 
         return consolidated_clusters
 
-    def _max_similarity(self, face_list: list, embedding: np.ndarray) -> float:
-        """Helper function to calculate the maximum similarity of an embedding with a list of faces."""
-        similarities = similarities = [
+    def _max_similarity(
+        self, face_list: List[Dict[str, Any]], embedding: np.ndarray
+    ) -> float:
+        """Calculate max similarity of an embedding with a list of faces.
+
+        Args:
+            face_list: List of face data.
+            embedding: The embedding to compare.
+
+        Returns:
+            The maximum similarity.
+        """
+        similarities = [
             1 - cosine(face["embedding"].flatten(), embedding.flatten())
             for face in face_list
         ]

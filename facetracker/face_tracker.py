@@ -1,6 +1,11 @@
+"""Module for tracking faces across video frames and selecting top frames."""
+
 import os
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
+import numpy as np
+import pandas as pd
 import torch
 from tqdm import tqdm
 
@@ -8,11 +13,26 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class FaceTracker:
-    def __init__(self, iou_threshold=0.5):
+    """A class for tracking faces across video frames."""
+
+    def __init__(self, iou_threshold: float = 0.5) -> None:
+        """Initialize the FaceTracker.
+
+        Args:
+            iou_threshold (float): Intersection over Union threshold for face tracking.
+        """
         self.iou_threshold = iou_threshold
 
-    def expand_box(self, box, expansion_ratio=0.1):
-        """Expand the bounding box by a given ratio."""
+    def expand_box(self, box: List[float], expansion_ratio: float = 0.1) -> List[float]:
+        """Expand the bounding box by a given ratio.
+
+        Args:
+            box (List[float]): Original bounding box coordinates [x1, y1, x2, y2].
+            expansion_ratio (float): Ratio to expand the box.
+
+        Returns:
+            List[float]: Expanded bounding box coordinates.
+        """
         width = box[2] - box[0]
         height = box[3] - box[1]
 
@@ -28,8 +48,16 @@ class FaceTracker:
         return expanded_box
 
     @staticmethod
-    def calculate_iou(box1, box2):
-        """Calculate Intersection over Union (IoU) between two bounding boxes."""
+    def calculate_iou(box1: List[float], box2: List[float]) -> float:
+        """Calculate Intersection over Union (IoU) between two bounding boxes.
+
+        Args:
+            box1 (List[float]): First bounding box coordinates.
+            box2 (List[float]): Second bounding box coordinates.
+
+        Returns:
+            float: IoU value.
+        """
         box1 = torch.tensor(box1, device=device, dtype=torch.float32)
         box2 = torch.tensor(box2, device=device, dtype=torch.float32)
 
@@ -48,9 +76,13 @@ class FaceTracker:
         iou = inter_area / (box1_area + box2_area - inter_area + 1e-6)
         return iou.item()
 
-    def track_faces(self, face_data, min_faces_per_cluster):
+    def track_faces(
+        self,
+        face_data: List[Tuple[int, List[float], float]],
+        min_faces_per_cluster: int,
+    ) -> List[List[Dict[str, Any]]]:
         """Track faces within a scene based on IoU threshold."""
-        clusters = []
+        clusters: List[List[Dict[str, Any]]] = []
 
         for frame_number, face, conf in face_data:
             face_added = False
@@ -71,8 +103,18 @@ class FaceTracker:
 
         return [cluster for cluster in clusters if len(cluster) > min_faces_per_cluster]
 
-    def track_faces_across_scenes(self, scene_data, face_data):
-        """Track faces across all scenes in a video."""
+    def track_faces_across_scenes(
+        self, scene_data: pd.DataFrame, face_data: Dict[int, Dict[str, Any]]
+    ) -> Dict[str, List[List[Dict[str, Any]]]]:
+        """Track faces across all scenes in a video.
+
+        Args:
+            scene_data: DataFrame containing scene information.
+            face_data: Face detection data for each frame.
+
+        Returns:
+            Dict[str, List[List[Dict[str, Any]]]]: Tracked faces across scenes.
+        """
         all_tracked_faces = {}
 
         for index, row in tqdm(
@@ -105,7 +147,23 @@ class FaceTracker:
 
 
 class FrameSelector:
-    def __init__(self, video_file, top_n=3, output_dir=None, save_images=True):
+    """A class for selecting top frames for each detected face."""
+
+    def __init__(
+        self,
+        video_file: str,
+        top_n: int = 3,
+        output_dir: Optional[str] = None,
+        save_images: bool = True,
+    ) -> None:
+        """Initialize the FrameSelector.
+
+        Args:
+            video_file (str): Path to the input video file.
+            top_n (int): Number of top frames to select for each face.
+            output_dir (Optional[str]): Directory to save output files.
+            save_images (bool): Whether to save cropped face images.
+        """
         self.video_file = video_file
         self.top_n = top_n
         self.output_dir = output_dir
@@ -115,30 +173,66 @@ class FrameSelector:
             os.makedirs(output_dir, exist_ok=True)
 
     @staticmethod
-    def calculate_brightness(image):
-        """Calculate the brightness of an image using GPU if available."""
+    def calculate_brightness(image: np.ndarray) -> float:
+        """Calculate the brightness of an image using GPU if available.
+
+        Args:
+            image (np.ndarray): Input image.
+
+        Returns:
+            float: Brightness value.
+        """
         image_tensor = torch.tensor(image, dtype=torch.float32)
         return torch.mean(image_tensor).item()
 
     @staticmethod
-    def calculate_blurriness(image):
-        """Calculate the blurriness of an image using GPU if available."""
-        image_tensor = torch.tensor(image, dtype=torch.float32)
+    def calculate_blurriness(image: np.ndarray) -> float:
+        """Calculate the blurriness of an image using GPU if available.
+
+        Args:
+            image (np.ndarray): Input image.
+
+        Returns:
+            float: Blurriness value.
+        """
         laplacian = torch.tensor(cv2.Laplacian(image, cv2.CV_32F))
         return torch.var(laplacian).item()
 
-    def save_cropped_face(self, face_image, unique_face_id, frame_idx):
-        """Save the cropped face image to disk and return the relative path."""
+    def save_cropped_face(
+        self, face_image: np.ndarray, unique_face_id: str, frame_idx: int
+    ) -> Optional[str]:
+        """Save the cropped face image to disk and return the relative path.
+
+        Args:
+            face_image (np.ndarray): Cropped face image.
+            unique_face_id (str): Unique identifier for the face.
+            frame_idx (int): Frame index.
+
+        Returns:
+            Optional[str]: Relative path to the saved image, or None if not saved.
+        """
         if self.output_dir and self.save_images:
             save_filename = f"{unique_face_id}_frame_{frame_idx}.jpg"
             save_path = os.path.join(self.output_dir, save_filename)
             cv2.imwrite(save_path, face_image)
             return save_filename
+        return None
 
-    def select_top_frames_per_face(self, tracked_data):
-        """Select top frames per face based on confidence, size, brightness, and blurriness."""
+    def select_top_frames_per_face(
+        self, tracked_data: Dict[str, List[List[Dict[str, Any]]]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Select top frames per face based on multiple criteria.
+
+        Criteria include confidence, size, brightness, and blurriness.
+
+        Args:
+            tracked_data: Dictionary containing tracked face data.
+
+        Returns:
+            Dictionary of selected top frames for each face.
+        """
         cap = cv2.VideoCapture(self.video_file)
-        selected_frames = {}
+        selected_frames: Dict[str, List[Dict[str, Any]]] = {}
         global_face_id = 0
 
         total_faces = sum(len(faces) for faces in tracked_data.values())
@@ -172,14 +266,16 @@ class FrameSelector:
                         height_cropped = max(0, y2 - y1)
                         if width_cropped == 0 or height_cropped == 0:
                             print(
-                                f"Warning: Invalid bounding box {face_coords} for frame {frame_idx}. Skipping."
+                                f"Warning: Invalid bounding box {face_coords} "
+                                f"for frame {frame_idx}. Skipping."
                             )
                             continue
 
                         face_image = frame[y1:y2, x1:x2]
                         if face_image.size == 0:
                             print(
-                                f"Warning: Face image is empty for frame {frame_idx}. Skipping."
+                                f"Warning: Face image is empty for frame {frame_idx}. "
+                                "Skipping."
                             )
                             continue
 
@@ -213,7 +309,7 @@ class FrameSelector:
                                 "frame_idx": frame_idx,
                                 "total_score": score,
                                 "face_coord": face_coords,
-                                "image_path": relative_path,  # Include the relative path in the JSON
+                                "image_path": relative_path,  # Relative path in JSON
                             }
                         )
 

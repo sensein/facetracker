@@ -23,7 +23,8 @@ classifiers = [
 packages = [{include = "facetracker"}]
 
 [tool.poetry.dependencies]
-python = "^3.10"  # Adjust this to match your Python version
+python = "^3.10"
+click = "^9.1.2"
 numpy = "^1.26.4"
 opencv-python = "^4.10.0"
 torch = "^2.2.2"

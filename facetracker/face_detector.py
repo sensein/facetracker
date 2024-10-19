@@ -1,20 +1,32 @@
+"""Face detection module for video processing."""
+
 import json
-import os
+from typing import Any, Dict, List, Tuple
 
 import cv2
+import numpy as np
 import torch
 from facenet_pytorch import MTCNN
-from tqdm import tqdm
 
 
 class FaceDetector:
+    """A class for detecting and annotating faces in video frames."""
+
     def __init__(
         self,
-        video_path,
-        output_dir,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        min_confidence=0.8,
-    ):
+        video_path: str,
+        output_dir: str,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        min_confidence: float = 0.8,
+    ) -> None:
+        """Initialize the FaceDetector.
+
+        Args:
+            video_path (str): Path to the input video file.
+            output_dir (str): Directory to save output files.
+            device (str): Device to use for computation ('cuda' or 'cpu').
+            min_confidence (float): Minimum confidence threshold for face detection.
+        """
         self.video_path = video_path
         self.output_dir = output_dir
         self.device = device
@@ -23,59 +35,60 @@ class FaceDetector:
         )  # Use MTCNN for face detection with scaling factor
         self.min_confidence = min_confidence
 
-    def detect_faces_in_video(self):
+    def detect_faces_in_video(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Detect faces in the video and return face detections.
+
+        Returns:
+            Dict[str, List[Dict[str, Any]]]: A dictionary containing face
+            detections for each frame.
+        """
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():  # Check if the video file was opened successfully
-            raise ValueError(f"Could not open video file: {self.video_path}")
+            raise ValueError(f"Error opening video file: {self.video_path}")
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        face_detections = {}
+        frame_count = 0
 
-        annotated_video_path = os.path.join(
-            self.output_dir,
-            f"{os.path.basename(self.video_path).split('.')[0]}_annotated.mp4",
-        )
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(
-            annotated_video_path,
-            fourcc,
-            int(fps),
-            (
-                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            ),
-        )
-
-        face_detections = []
-
-        for frame_idx in tqdm(range(total_frames), desc="Processing video frames"):
+        while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
             faces, annotated_frame = self._detect_and_annotate_frame(frame)
-            out.write(annotated_frame)
 
-            face_detections.append({"frame_index": frame_idx, "detections": faces})
+            if faces:
+                face_detections[f"frame_{frame_count}"] = faces
+
+            cv2.imwrite(f"{self.output_dir}/frame_{frame_count}.jpg", annotated_frame)
+            frame_count += 1
 
         cap.release()
-        out.release()
-
         return face_detections
 
-    def _detect_and_annotate_frame(self, frame):
+    def _detect_and_annotate_frame(
+        self, frame: np.ndarray
+    ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
+        """Detect faces in a frame and annotate it.
+
+        Args:
+            frame (np.ndarray): Input frame.
+
+        Returns:
+            Tuple[List[Dict[str, Any]], np.ndarray]: Detected faces and
+            annotated frame.
+        """
         faces = []
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        boxes, probs = self.mtcnn.detect(frame_rgb)
 
-        boxes, probs, landmarks = self.mtcnn.detect(frame_rgb, landmarks=True)
         if boxes is not None:
-            for box, prob, landmark in zip(boxes, probs, landmarks):
-                if prob >= self.min_confidence and self._is_valid_box(box):
+            for box, prob in zip(boxes, probs):
+                if prob > self.min_confidence and self._is_valid_box(box):
+                    x1, y1, x2, y2 = map(int, box)
                     faces.append(
                         {
-                            "box": box.tolist(),
-                            "confidence": prob,
-                            "landmarks": landmark.tolist(),
+                            "bbox": [x1, y1, x2, y2],
+                            "confidence": float(prob),
                         }
                     )
 
@@ -84,50 +97,51 @@ class FaceDetector:
 
     def _annotate_frame(
         self,
-        frame,
-        faces,
-        rect_color=(0, 255, 0),
-        circle_color=(0, 0, 255),
-        text_color=(255, 255, 255),
-    ):
+        frame: np.ndarray,
+        faces: List[Dict[str, Any]],
+        rect_color: Tuple[int, int, int] = (0, 255, 0),
+        circle_color: Tuple[int, int, int] = (0, 0, 255),
+        text_color: Tuple[int, int, int] = (255, 255, 255),
+    ) -> np.ndarray:
+        """Annotate the frame with detected faces."""
         for face in faces:
-            box = face["box"]
-            landmarks = face["landmarks"]
+            x1, y1, x2, y2 = face["bbox"]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), rect_color, 2)
+
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+            cv2.circle(frame, (center_x, center_y), 5, circle_color, -1)
+
             confidence = face["confidence"]
-
-            # Draw the bounding box
-            cv2.rectangle(
-                frame,
-                (int(box[0]), int(box[1])),
-                (int(box[2]), int(box[3])),
-                rect_color,
-                2,
-            )
-
-            # Draw the landmarks
-            for point in landmarks:
-                cv2.circle(frame, (int(point[0]), int(point[1])), 2, circle_color, -1)
-
-            # Display the confidence level
+            label = f"Face: {confidence:.2f}"
             cv2.putText(
                 frame,
-                f"{confidence:.2f}",
-                (int(box[0]), int(box[1]) - 10),
+                label,
+                (x1, y1 - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.9,
                 text_color,
                 2,
             )
+
         return frame
 
-    def _is_valid_box(self, box, min_size=20, max_aspect_ratio=1.5):
+    def _is_valid_box(
+        self, box: List[float], min_size: int = 20, max_aspect_ratio: float = 1.5
+    ) -> bool:
+        """Check if the bounding box is valid."""
         width = box[2] - box[0]
         height = box[3] - box[1]
-        aspect_ratio = max(width / height, height / width)
+        aspect_ratio = max(width, height) / min(width, height)
         return (
-            width > min_size and height > min_size and aspect_ratio <= max_aspect_ratio
+            width >= min_size
+            and height >= min_size
+            and aspect_ratio <= max_aspect_ratio
         )
 
-    def save_results(self, output_file, face_detections):
+    def save_results(
+        self, output_file: str, face_detections: Dict[str, List[Dict[str, Any]]]
+    ) -> None:
+        """Save face detection results to a JSON file."""
         with open(output_file, "w") as f:
             json.dump(face_detections, f, indent=4)
