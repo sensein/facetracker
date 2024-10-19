@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
 class FaceTracker:
     """A class for tracking faces across video frames."""
 
@@ -49,29 +48,22 @@ class FaceTracker:
 
     @staticmethod
     def calculate_iou(box1: List[float], box2: List[float]) -> float:
-        """Calculate Intersection over Union (IoU) between two bounding boxes.
+        """Calculate Intersection over Union (IoU) between two bounding boxes."""
+        box1_tensor = torch.tensor(box1, device=device, dtype=torch.float32)
+        box2_tensor = torch.tensor(box2, device=device, dtype=torch.float32)
 
-        Args:
-            box1 (List[float]): First bounding box coordinates.
-            box2 (List[float]): Second bounding box coordinates.
+        x1_inter = torch.max(box1_tensor[0], box2_tensor[0])
+        y1_inter = torch.max(box1_tensor[1], box2_tensor[1])
+        x2_inter = torch.min(box1_tensor[2], box2_tensor[2])
+        y2_inter = torch.min(box1_tensor[3], box2_tensor[3])
 
-        Returns:
-            float: IoU value.
-        """
-        box1 = torch.tensor(box1, device=device, dtype=torch.float32)
-        box2 = torch.tensor(box2, device=device, dtype=torch.float32)
+        inter_area = (
+            torch.clamp(x2_inter - x1_inter, min=0) *
+            torch.clamp(y2_inter - y1_inter, min=0)
+        )
 
-        x1_inter = torch.max(box1[0], box2[0])
-        y1_inter = torch.max(box1[1], box2[1])
-        x2_inter = torch.min(box1[2], box2[2])
-        y2_inter = torch.min(box1[3], box2[3])
-
-        inter_area = torch.max(
-            torch.tensor(0.0, device=device), x2_inter - x1_inter
-        ) * torch.max(torch.tensor(0.0, device=device), y2_inter - y1_inter)
-
-        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        box1_area = (box1_tensor[2] - box1_tensor[0]) * (box1_tensor[3] - box1_tensor[1])
+        box2_area = (box2_tensor[2] - box2_tensor[0]) * (box2_tensor[3] - box2_tensor[1])
 
         iou = inter_area / (box1_area + box2_area - inter_area + 1e-6)
         return iou.item()
