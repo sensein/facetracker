@@ -62,8 +62,14 @@ class FaceTracker:
             torch.clamp(y2_inter - y1_inter, min=0)
         )
 
-        box1_area = (box1_tensor[2] - box1_tensor[0]) * (box1_tensor[3] - box1_tensor[1])
-        box2_area = (box2_tensor[2] - box2_tensor[0]) * (box2_tensor[3] - box2_tensor[1])
+        box1_area = (
+            (box1_tensor[2] - box1_tensor[0]) * 
+            (box1_tensor[3] - box1_tensor[1])
+        )
+        box2_area = (
+            (box2_tensor[2] - box2_tensor[0]) * 
+            (box2_tensor[3] - box2_tensor[1])
+        )
 
         iou = inter_area / (box1_area + box2_area - inter_area + 1e-6)
         return iou.item()
