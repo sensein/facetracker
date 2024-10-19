@@ -3,10 +3,10 @@ name = "facetracker"
 version = "0.0.1"
 description = "facetracker is a Python package for doing incredible stuff."
 authors = [
-    "sensein <yibei@mit.edu>",
+  "sensein <yibei@mit.edu>"
 ]
 maintainers = [
-    "sensein <yibei@mit.edu>",
+  "sensein <yibei@mit.edu>"
 ]
 license = "MIT"
 readme = "README.md"
@@ -23,7 +23,7 @@ classifiers = [
 packages = [{include = "facetracker"}]
 
 [tool.poetry.dependencies]
-python = "^3.11"  # Adjust this to match your Python version
+python = "^3.10"  # Adjust this to match your Python version
 numpy = "^1.26.4"
 opencv-python = "^4.10.0"
 torch = "^2.2.2"
@@ -39,6 +39,7 @@ scenedetect = "^0.6.4"
 
 [tool.poetry.group.dev]
 optional = true
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"
 mypy = "^1.9.0"
@@ -48,8 +49,12 @@ ruff = "^0.3.4"
 
 [tool.poetry.group.docs]
 optional = true
+
 [tool.poetry.group.docs.dependencies]
 pdoc = "^14.4.0"
+
+[tool.poetry.scripts]
+facetracker-cli = "facetracker.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = [
@@ -89,7 +94,7 @@ exclude = [
 line-length = 88
 indent-width = 4
 src = ["."]
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["ANN", "D", "E", "F", "I"]
@@ -107,9 +112,6 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = []
 
-[tool.poetry.scripts]
-facetracker-cli = "facetracker.cli:main"
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -122,6 +124,7 @@ vcs = "git"
 style = "pep440"
 bump = true
 pattern = "default-unprefixed"
+
 [build-system]
 requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
 build-backend = "poetry_dynamic_versioning.backend"
