@@ -45,8 +45,7 @@ jobs:
       shell: bash
     - name: Build docs
       run: |
-        APP_MODULE_NAME=$(ls src -U | head -1)
-        poetry run pdoc src/"$APP_MODULE_NAME" -o docs -t docs_style/pdoc-theme --docformat google
+        poetry run pdoc . -o docs -t docs_style/pdoc-theme --docformat google
         touch docs/.nojekyll
       shell: bash
     - name: Determine if deployment is needed
