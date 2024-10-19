@@ -1,30 +1,44 @@
 [tool.poetry]
-name = "YOUR_PACKAGE_NAME"
+name = "facetracker"
 version = "0.0.1"
-description = "YOUR_PACKAGE_NAME is a Python package for doing incredible stuff."
+description = "facetracker is a Python package for doing incredible stuff."
 authors = [
-    "YOUR_GITHUB_NICKNAME <YOUR_EMAIL>",
+    "sensein <yibei@mit.edu>",
 ]
 maintainers = [
-    "YOUR_GITHUB_NICKNAME <YOUR_EMAIL>",
+    "sensein <yibei@mit.edu>",
 ]
-license = "Apache-2.0"
+license = "MIT"
 readme = "README.md"
-homepage = "YOUR_PACKAGE_REPO"
-repository = "YOUR_PACKAGE_REPO"
-documentation = "https://YOUR_GITHUB_NICKNAME.github.io/YOUR_PACKAGE_NAME"
+homepage = "https://github.com/sensein/facetracker"
+repository = "https://github.com/sensein/facetracker"
+documentation = "https://sensein.github.io/facetracker"
 keywords = ["python", "package", "template"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3.10",
-  "License :: OSI Approved :: Apache Software License",
+  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent"
 ]
-packages = [{include = "YOUR_PACKAGE_NAME", from = "src"}]
+packages = [{include = "facetracker"}]
 
 [tool.poetry.dependencies]
-python = "^3.10"
-click = "^8.1.7"
+python = "^3.11"  # Adjust this to match your Python version
+numpy = "^1.26.4"
+opencv-python = "^4.10.0"
+torch = "^2.2.2"
+torchvision = "^0.17.2"
+facenet-pytorch = "^2.6.0"
+scikit-learn = "^1.5.1"
+scipy = "^1.14.1"
+pandas = "^2.2.2"
+matplotlib = "^3.9.2"
+pillow = "^10.2.0"
+tqdm = "^4.66.5"
+scenedetect = "^0.6.4"
+
+[tool.poetry.dev-dependencies]
+pytest = "^6.2.5" 
 
 [tool.poetry.group.dev]
 optional = true
@@ -42,10 +56,10 @@ pdoc = "^14.4.0"
 
 [tool.pytest.ini_options]
 pythonpath = [
-  "src"
+  "."
 ]
 testpaths = [
-  "src/tests"
+  "tests"
 ]
 
 [tool.mypy]
@@ -77,8 +91,8 @@ exclude = [
 ]
 line-length = 88
 indent-width = 4
-src = ["src"]
-target-version = "py310"
+src = ["."]
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["ANN", "D", "E", "F", "I"]
@@ -94,10 +108,10 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"src/tests/**/*.py" = []
+"tests/**/*.py" = []
 
 [tool.poetry.scripts]
-YOUR_PACKAGE_NAME-cli = "YOUR_PACKAGE_NAME.cli:main"
+facetracker-cli = "facetracker.cli:main"
 
 [tool.ruff.format]
 quote-style = "double"

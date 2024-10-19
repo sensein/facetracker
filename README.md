@@ -5,7 +5,7 @@ This template is here to help you kick off your projects with a clean and effici
 It's inspired by the [python template by the Child Mind Institute](https://github.com/childmindresearch/template-python-repository) (thanks you!). Our version diverges in its setup process and in both the variety and quantity of automated features included.
 
 Just follow these steps, and you'll be on your way:
-1. **Choose a unique package name:** First off, you need a cool name for your package. To make sure it's not already taken on PyPI, head over to `https://pypi.org/project/YOUR_PACKAGE_NAME/`. If you get a "Not Found" page, you're likely good to go!
+1. **Choose a unique package name:** First off, you need a cool name for your package. To make sure it's not already taken on PyPI, head over to `https://pypi.org/project/facetracker/`. If you get a "Not Found" page, you're likely good to go!
 
 2. **Use this template:** Go to the GitHub page for this template. You'll find a "Use this template" button on the top right. Click it to start setting up your project with the template's structure.
 
@@ -27,13 +27,13 @@ Go to your repository on GitHub, click on "Settings" > "Secrets" > "Actions", th
 
 5. **Clone the repo:** Once your repository is set up, clone it to your local machine.
 
-6. **Replace placeholders with custom values**: Please, run `python template_setup.py --package-name YOUR_PACKAGE_NAME --package-repo-without-git-extension YOUR_PACKAGE_REPO --github-nickname YOUR_GITHUB_NICKNAME --codecov-token CODECOV_GRAPHICS_TOKEN --email YOUR_EMAIL`. 
+6. **Replace placeholders with custom values**: Please, run `python template_setup.py --package-name facetracker --package-repo-without-git-extension https://github.com/sensein/facetracker --github-nickname sensein --codecov-token 014fb51c-ea46-4f81-83e3-80dac272bef3 --email yibei@mit.edu`. 
 For example, `python template_setup.py --package-name pipepal --package-repo-without-git-extension https://github.com/fabiocat93/pipepal --github-nickname fabiocat93 --codecov-token IQR1RCYMAA --email fabiocat@mit.edu`. This will replace some placeholders in the entire directory (including folder names, file names, file content) with your custom info:
-- YOUR_PACKAGE_NAME (e.g., `pipepal`)
-- YOUR_PACKAGE_REPO (e.g., `https://github.com/sensein/pipepal`)
-- YOUR_GITHUB_NICKNAME (e.g., `sensein`)
-- CODECOV_GRAPHICS_TOKEN (e.g.,`ABC0DEFGHI`)
-- YOUR_EMAIL (e.g., `sensein@mit.edu`)
+- facetracker (e.g., `pipepal`)
+- https://github.com/sensein/facetracker (e.g., `https://github.com/sensein/pipepal`)
+- sensein (e.g., `sensein`)
+- 014fb51c-ea46-4f81-83e3-80dac272bef3 (e.g.,`ABC0DEFGHI`)
+- yibei@mit.edu (e.g., `sensein@mit.edu`)
 It will also enable GitHub custom automation and delete the `template_setup.py` (you won't need that anymore).
 
 7. **Adjust `pyproject.toml`:** Please, double-check `pyproject.toml` and update it with some custom info, if needed (i.e., `description`, `authors`, `maintainers`, `description`, `homepage`, `repository`, `keywords`, and `classifiers`). No need to touch `version`. This will be automatically handled by the package.
@@ -63,19 +63,19 @@ It will also enable GitHub custom automation and delete the `template_setup.py` 
 That's it! With these steps, you're well on your way to creating an awesome Python package. Keep up the great work, and **happy coding**!
 
 
-# The ```YOUR_PACKAGE_NAME``` repo
+# The ```facetracker``` repo
 
-[![Build](YOUR_PACKAGE_REPO/actions/workflows/test.yaml/badge.svg?branch=main)](YOUR_PACKAGE_REPO/actions/workflows/test.yaml?query=branch%3Amain)
-[![codecov](https://codecov.io/gh/YOUR_GITHUB_NICKNAME/YOUR_PACKAGE_NAME/branch/main/graph/badge.svg?token=CODECOV_GRAPHICS_TOKEN)](https://codecov.io/gh/YOUR_GITHUB_NICKNAME/YOUR_PACKAGE_NAME)
+[![Build](https://github.com/sensein/facetracker/actions/workflows/test.yaml/badge.svg?branch=main)](https://github.com/sensein/facetracker/actions/workflows/test.yaml?query=branch%3Amain)
+[![codecov](https://codecov.io/gh/sensein/facetracker/branch/main/graph/badge.svg?token=014fb51c-ea46-4f81-83e3-80dac272bef3)](https://codecov.io/gh/sensein/facetracker)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-[![PyPI](https://img.shields.io/pypi/v/YOUR_PACKAGE_NAME.svg)](https://pypi.org/project/YOUR_PACKAGE_NAME/)
-[![Python Version](https://img.shields.io/pypi/pyversions/YOUR_PACKAGE_NAME)](https://pypi.org/project/YOUR_PACKAGE_NAME)
-[![License](https://img.shields.io/pypi/l/YOUR_PACKAGE_NAME)](https://opensource.org/licenses/Apache-2.0)
+[![PyPI](https://img.shields.io/pypi/v/facetracker.svg)](https://pypi.org/project/facetracker/)
+[![Python Version](https://img.shields.io/pypi/pyversions/facetracker)](https://pypi.org/project/facetracker)
+[![License](https://img.shields.io/pypi/l/facetracker)](https://opensource.org/licenses/Apache-2.0)
 
-[![pages](https://img.shields.io/badge/api-docs-blue)](https://YOUR_GITHUB_NICKNAME.github.io/YOUR_PACKAGE_NAME)
+[![pages](https://img.shields.io/badge/api-docs-blue)](https://sensein.github.io/facetracker)
 
-Welcome to the ```YOUR_PACKAGE_NAME``` repo! This is a Python package for doing incredible stuff.
+Welcome to the ```facetracker``` repo! This is a Python package for doing incredible stuff.
 
 **Caution:**: this package is still under development and may change rapidly over the next few weeks.
 
@@ -89,18 +89,18 @@ Welcome to the ```YOUR_PACKAGE_NAME``` repo! This is a Python package for doing 
 Install this package via :
 
 ```sh
-pip install YOUR_PACKAGE_NAME
+pip install facetracker
 ```
 
 Or get the newest development version via:
 
 ```sh
-pip install git+YOUR_PACKAGE_REPO.git
+pip install git+https://github.com/sensein/facetracker.git
 ```
 
 ## Quick start
 ```Python
-from YOUR_PACKAGE_NAME.app import hello_world
+from facetracker.app import hello_world
 
 hello_world()
 ```
