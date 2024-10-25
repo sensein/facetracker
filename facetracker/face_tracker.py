@@ -6,16 +6,11 @@ from tqdm import tqdm
 import torch
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
+import pandas as pd
 
 class KalmanBoxTracker(object):
-    """
-    This class represents the internal state of individual tracked objects observed as bbox.
-    """
     count = 0
     def __init__(self, bbox):
-        """
-        Initialize a tracker using initial bounding box.
-        """
         self.kf = KalmanFilter(dim_x=7, dim_z=4)
         self.kf.F = np.array([
             [1,0,0,0,1,0,0],
@@ -34,7 +29,7 @@ class KalmanBoxTracker(object):
         ])
 
         self.kf.R[2:,2:] *= 10.
-        self.kf.P[4:,4:] *= 1000. # give high uncertainty to the unobservable initial velocities
+        self.kf.P[4:,4:] *= 1000.
         self.kf.P *= 10.
         self.kf.Q[-1,-1] *= 0.01
         self.kf.Q[4:,4:] *= 0.01
@@ -47,21 +42,21 @@ class KalmanBoxTracker(object):
         self.hits = 0
         self.hit_streak = 0
         self.age = 0
+        self.predict_num = 0
+        self.additional_attributes = []
 
     def update(self, bbox):
-        """
-        Updates the state vector with observed bbox.
-        """
         self.time_since_update = 0
         self.history = []
         self.hits += 1
         self.hit_streak += 1
-        self.kf.update(self.convert_bbox_to_z(bbox))
+        if len(bbox) > 0:
+            self.kf.update(self.convert_bbox_to_z(bbox))
+            self.predict_num = 0
+        else:
+            self.predict_num += 1
 
     def predict(self):
-        """
-        Advances the state vector and returns the predicted bounding box estimate.
-        """
         if((self.kf.x[6]+self.kf.x[2])<=0):
             self.kf.x[6] *= 0.0
         self.kf.predict()
@@ -70,35 +65,23 @@ class KalmanBoxTracker(object):
             self.hit_streak = 0
         self.time_since_update += 1
         self.history.append(self.convert_x_to_bbox(self.kf.x))
-        return self.history[-1]
+        return self.get_state()
 
     def get_state(self):
-        """
-        Returns the current bounding box estimate.
-        """
         return self.convert_x_to_bbox(self.kf.x)
 
     @staticmethod
     def convert_bbox_to_z(bbox):
-        """
-        Takes a bounding box in the form [x1,y1,x2,y2] and returns z in the form
-        [x,y,s,r] where x,y is the center of the box and s is the scale/area and r is
-        the aspect ratio
-        """
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
         x = bbox[0] + w/2.
         y = bbox[1] + h/2.
-        s = w * h    #scale is just area
+        s = w * h
         r = w / float(h)
         return np.array([x, y, s, r]).reshape((4, 1))
 
     @staticmethod
-    def convert_x_to_bbox(x,score=None):
-        """
-        Takes a bounding box in the centre form [x,y,s,r] and returns it in the form
-        [x1,y1,x2,y2] where x1,y1 is the top left and x2,y2 is the bottom right
-        """
+    def convert_x_to_bbox(x, score=None):
         w = np.sqrt(x[2] * x[3])
         h = x[2] / w
         if(score==None):
@@ -108,66 +91,74 @@ class KalmanBoxTracker(object):
 
 class Sort(object):
     def __init__(self, max_age=1, min_hits=3, iou_threshold=0.3):
-        """
-        Sets key parameters for SORT
-        """
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold
         self.trackers = []
         self.frame_count = 0
 
-    def update(self, dets=np.empty((0, 5))):
+    def update(self, dets, img_size, additional_attributes=None, predict_num=5):
         """
         Params:
-          dets - a numpy array of detections in the format [[x1,y1,x2,y2,score],[x1,y1,x2,y2,score],...]
-        Requires: this method must be called once for each frame even with empty detections (use np.empty((0, 5)) for frames without detections).
-        Returns the a similar array, where the last column is the object ID.
-
-        NOTE: The number of objects returned may differ from the number of detections provided.
+          dets - a numpy array of detections in the format [[x,y,w,h,score],[x,y,w,h,score],...]
+          img_size - [height, width] of the image
+          additional_attributes - list of additional attributes for each detection
+          predict_num - maximum number of frames to predict when unmatched
+        Returns a similar array, where the last column is the object ID.
         """
         self.frame_count += 1
-        # get predicted locations from existing trackers.
+        
+        # Get predicted locations from existing trackers
         trks = np.zeros((len(self.trackers), 5))
         to_del = []
-        ret = []
-        for t, trk in enumerate(trks):
-            pos = self.trackers[t].predict()[0]
-            trk[:] = [pos[0], pos[1], pos[2], pos[3], 0]
+        for t, trk in enumerate(self.trackers):
+            pos = trk.predict()[0]
+            trks[t, :] = [pos[0], pos[1], pos[2], pos[3], 0]
             if np.any(np.isnan(pos)):
                 to_del.append(t)
+        
         trks = np.ma.compress_rows(np.ma.masked_invalid(trks))
         for t in reversed(to_del):
             self.trackers.pop(t)
-        matched, unmatched_dets, unmatched_trks = self.associate_detections_to_trackers(dets, trks)
+        
+        if len(dets) > 0:
+            matched, unmatched_dets, unmatched_trks = self.associate_detections_to_trackers(self, detections, trackers, self.iou_threshold)
 
-        # update matched trackers with assigned detections
-        for m in matched:
-            self.trackers[m[1]].update(dets[m[0], :])
+            # Update matched trackers with assigned detections
+            for t, trk in enumerate(self.trackers):
+                if t not in unmatched_trks:
+                    d = matched[np.where(matched[:, 1] == t)[0], 0]
+                    trk.update(dets[d, :][0])
+                    if additional_attributes:
+                        trk.additional_attributes.append(additional_attributes[d[0]])
 
-        # create and initialise new trackers for unmatched detections
-        for i in unmatched_dets:
-            trk = KalmanBoxTracker(dets[i,:])
-            self.trackers.append(trk)
+            # Create and initialise new trackers for unmatched detections
+            for i in unmatched_dets:
+                trk = KalmanBoxTracker(dets[i, :])
+                if additional_attributes:
+                    trk.additional_attributes.append(additional_attributes[i])
+                self.trackers.append(trk)
+        
+        ret = []
         i = len(self.trackers)
         for trk in reversed(self.trackers):
+            if len(dets) == 0:
+                trk.update([])
             d = trk.get_state()[0]
             if (trk.time_since_update < 1) and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):
-                ret.append(np.concatenate((d,[trk.id+1])).reshape(1,-1)) # +1 as MOT benchmark requires positive
+                ret.append(np.concatenate((d, [trk.id + 1])).reshape(1, -1))  # +1 as MOT benchmark requires positive
             i -= 1
-            # remove dead tracklet
-            if(trk.time_since_update > self.max_age):
+            # Remove dead tracklet
+            if (trk.time_since_update >= self.max_age or 
+                trk.predict_num >= predict_num or 
+                d[2] < 0 or d[3] < 0 or d[0] > img_size[1] or d[1] > img_size[0]):
                 self.trackers.pop(i)
-        if(len(ret)>0):
+        
+        if len(ret) > 0:
             return np.concatenate(ret)
-        return np.empty((0,5))
+        return np.empty((0, 5))
 
     def associate_detections_to_trackers(self, detections, trackers, iou_threshold = 0.3):
-        """
-        Assigns detections to tracked object (both represented as bounding boxes)
-
-        Returns 3 lists of matches, unmatched_detections and unmatched_trackers
-        """
         if(len(trackers)==0):
             return np.empty((0,2),dtype=int), np.arange(len(detections)), np.empty((0,5),dtype=int)
 
@@ -190,7 +181,6 @@ class Sort(object):
             if(t not in matched_indices[:,1]):
                 unmatched_trackers.append(t)
 
-        #filter out matched with low IOU
         matches = []
         for m in matched_indices:
             if(iou_matrix[m[0],m[1]]<iou_threshold):
@@ -207,9 +197,6 @@ class Sort(object):
 
     @staticmethod
     def iou(bb_test, bb_gt):
-        """
-        Computes IOU between two bounding boxes in the form [x1,y1,x2,y2]
-        """
         xx1 = np.maximum(bb_test[0], bb_gt[0])
         yy1 = np.maximum(bb_test[1], bb_gt[1])
         xx2 = np.minimum(bb_test[2], bb_gt[2])
@@ -222,52 +209,52 @@ class Sort(object):
         return(o)
 
 class FaceTracker:
-    def __init__(self, max_age=1, min_hits=3, iou_threshold=0.3):
-        self.sort_tracker = Sort(max_age, min_hits, iou_threshold)
-        self.global_face_id = 0
-        self.face_id_mapping = {}
+    def __init__(self, max_age: int = 1, min_hits: int = 3, iou_threshold: float = 0.5):
+        self.sort_tracker = Sort(max_age=max_age, min_hits=min_hits, iou_threshold=iou_threshold)
+        self.next_global_id = 0
+        self.face_data: Dict[int, Dict[str, Any]] = {}
+        self.sort_id_to_global_id: Dict[int, int] = {}
+        self.global_id_to_confidence: Dict[int, float] = {}
 
-    def track_faces(self, face_data):
-        detections = np.array([face[1] + [face[2]] for face in face_data])
-        tracked_faces = self.sort_tracker.update(detections)
+    def track_faces(self, frame: int, face_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        print(f"Input face_data: {face_data}")
+        
+        if not face_data:
+            tracked_faces = self.sort_tracker.update()
+        else:
+            detections = np.array([face['bbox'] + [face['confidence']] for face in face_data])
+            print(f"Detections passed to SORT: {detections}")
+            tracked_faces = self.sort_tracker.update(detections)
+        
+        print(f"Output from SORT tracker: {tracked_faces}")
         
         result = []
-        for i, face in enumerate(tracked_faces):
-            sort_id = int(face[5])
-            if sort_id not in self.face_id_mapping:
-                self.face_id_mapping[sort_id] = self.global_face_id
-                self.global_face_id += 1
-            
-            result.append({
-                "frame": face_data[i][0],
-                "face": face[:4].tolist(),
-                "conf": face[4],
-                "id": self.face_id_mapping[sort_id]
-            })
         
+        for i, face in enumerate(tracked_faces):
+            sort_id = int(face[4])
+            if sort_id not in self.sort_id_to_global_id:
+                global_id = self.next_global_id
+                self.next_global_id += 1
+                self.sort_id_to_global_id[sort_id] = global_id
+                self.global_id_to_confidence[global_id] = face_data[i]['confidence'] if i < len(face_data) else 1.0
+            else:
+                global_id = self.sort_id_to_global_id[sort_id]
+            
+            face_info = {
+                "id": global_id,
+                "frame": frame,
+                "bbox": face[:4].tolist(),
+                "confidence": self.global_id_to_confidence[global_id]
+            }
+            print(f"Created face_info: {face_info}")
+            self.face_data[global_id] = face_info
+            result.append(face_info)
+        
+        print(f"Final result: {result}")
         return result
 
-    def track_faces_across_scenes(self, scene_data, face_data):
-        all_tracked_faces = {}
-
-        for index, row in scene_data.iterrows():
-            frame_start, frame_end = int(row["Start Frame"]), int(row["End Frame"])
-            scene_id = f"scene_{index + 1}"
-
-            face_data_for_scene = []
-
-            for i in range(frame_start, frame_end + 1):
-                faces = face_data.get(i, {"detections": []})["detections"]
-                for f in faces:
-                    face_data_for_scene.append((i, f["box"], f["confidence"]))
-
-            if not face_data_for_scene:
-                continue
-
-            tracked_faces = self.track_faces(face_data_for_scene)
-            all_tracked_faces[scene_id] = tracked_faces
-
-        return all_tracked_faces
+    def get_face_data(self) -> Dict[int, Dict[str, Any]]:
+        return self.face_data
     
 class FrameSelector:
     def __init__(
