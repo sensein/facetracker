@@ -11,7 +11,6 @@ from facenet_pytorch import InceptionResnetV1
 from scipy.spatial.distance import cdist, cosine
 from tqdm import tqdm
 
-
 class FaceEmbedder:
     """Class for generating face embeddings from images."""
 
@@ -59,47 +58,75 @@ class FaceEmbedder:
         return face_tensor
 
     def get_face_embeddings(
-        self, selected_frames: Dict[str, List[Dict[str, Any]]], image_dir: str
+        self, selected_frames_by_scene: Dict[str, List[Dict[str, Any]]], image_dir: str
     ) -> List[Dict[str, Any]]:
-        """Get embeddings for each cropped face image."""
-        face_embeddings = []
+        """Get embeddings for each cropped face image, carrying along associated data.
 
-        # Initialize progress bar
+        Args:
+            selected_frames_by_scene: Output from FrameSelector, structured as 
+                                     Dict[scene_id, List[unique_track_data]], where
+                                     unique_track_data is Dict["unique_track_id", "top_frames"].
+                                     Each item in "top_frames" has "image_path", 
+                                     "face_mesh", "full_body_pose", etc.
+            image_dir: Directory containing the cropped face images.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries, one for each unique track.
+                                  Each dict contains "unique_track_id", "scene_id", and 
+                                  "frames_data" (a list of dicts with "frame_idx", 
+                                  "embedding", "image_path", "face_mesh", "full_body_pose").
+        """
+        all_tracks_data_with_embeddings = []
+
+        # Calculate total number of top_frames to process for tqdm
+        total_top_frames = 0
+        for scene_id, unique_tracks_in_scene in selected_frames_by_scene.items():
+            for unique_track_data in unique_tracks_in_scene:
+                total_top_frames += len(unique_track_data.get("top_frames", []))
+
         with tqdm(
-            total=len(selected_frames), desc="Extracting Face Embeddings", unit="face"
+            total=total_top_frames, desc="Extracting Face Embeddings", unit="frame"
         ) as pbar:
-            for scene_id, faces in selected_frames.items():
-                for face_data in faces:
-                    embeddings = []
-                    for frame_info in face_data["top_frames"]:
-                        image_path = os.path.join(
+            for scene_id, unique_tracks_in_scene in selected_frames_by_scene.items():
+                for unique_track_data in unique_tracks_in_scene:
+                    track_unique_id = unique_track_data["unique_track_id"]
+                    
+                    current_track_frames_data = []
+                    for frame_info in unique_track_data.get("top_frames", []):
+                        image_path_full = os.path.join(
                             image_dir, frame_info["image_path"]
-                        )  # Construct full path to image
-                        face_tensor = self.load_image(image_path)
-                        with torch.no_grad():
-                            embedding = self.model(face_tensor).cpu().numpy()
-                        embeddings.append(
+                        )
+                        try:
+                            face_tensor = self.load_image(image_path_full)
+                            with torch.no_grad():
+                                embedding = self.model(face_tensor).cpu().numpy()
+                        except ValueError as e:
+                            print(f"Skipping embedding for {image_path_full} due to load error: {e}")
+                            pbar.update(1)
+                            continue # Skip this frame if image can't be loaded
+                            
+                        current_track_frames_data.append(
                             {
                                 "frame_idx": frame_info["frame_idx"],
                                 "embedding": embedding,
                                 "image_path": frame_info["image_path"],
+                                "face_mesh": frame_info.get("face_mesh"), # Pass through
+                                "full_body_pose": frame_info.get("full_body_pose"), # Pass through
+                                "face_coord": frame_info.get("face_coord"), # Pass through, might be useful
+                                "total_score": frame_info.get("total_score") # Pass through quality score
                             }
                         )
-
-                    face_embeddings.append(
-                        {
-                            "scene_id": scene_id,
-                            "unique_face_id": face_data["unique_face_id"],
-                            "global_face_id": face_data["global_face_id"],
-                            "embeddings": embeddings,
-                        }
-                    )
-
-                    # Update progress bar
-                    pbar.update(1)
-
-        return face_embeddings
-
+                        pbar.update(1)
+                    
+                    if current_track_frames_data: # Only add track if it has successfully processed frames
+                        all_tracks_data_with_embeddings.append(
+                            {
+                                "unique_track_id": track_unique_id,
+                                "scene_id": scene_id,
+                                "frames_data": current_track_frames_data,
+                            }
+                        )
+        return all_tracks_data_with_embeddings
 
 class FaceClusterer:
     """Class for clustering face embeddings using Chinese Whispers algorithm."""
@@ -117,62 +144,63 @@ class FaceClusterer:
         self.max_iterations = max_iterations
 
     def build_graph(
-        self, face_embeddings: List[Dict[str, Any]]
-    ) -> Tuple[nx.Graph, List[Any]]:
+        self, all_tracks_data: List[Dict[str, Any]]
+    ) -> Tuple[nx.Graph, List[Dict[str, Any]]]:
         """Build a graph of embeddings and similarities.
 
-        Nodes represent embeddings, and edges represent similarities.
+        Nodes represent individual frame embeddings. Edges represent similarities.
 
         Args:
-            face_embeddings: List of face embedding data.
+            all_tracks_data: List of track data from FaceEmbedder.
+                             Each dict has "unique_track_id", "scene_id", and "frames_data".
+                             "frames_data" is a list of dicts with "embedding", "frame_idx", 
+                             "image_path", "face_mesh", "full_body_pose", etc.
 
         Returns:
-            The constructed graph and node data.
+            The constructed graph and a flat list of node_attributes (one per embedding/frame).
         """
         G = nx.Graph()
+        node_attributes_list = [] # Flat list, each item corresponds to a node (an embedding)
+        node_idx_counter = 0
 
-        # Flatten embeddings with identifiers into node_data
-        node_data = [
-            (
-                i,
-                emb_info["embedding"],
-                face_data,
-                emb_info["frame_idx"],
-                emb_info["image_path"],
-            )
-            for i, face_data in enumerate(face_embeddings)
-            for emb_info in face_data["embeddings"]
-        ]
-
-        # Add nodes to the graph
-        for i, (face_idx, embedding, face_data, frame_idx, image_path) in enumerate(
-            node_data
-        ):
-            G.add_node(
-                i,
-                face_idx=face_idx,
-                embedding=embedding,
-                face_data=face_data,
-                frame_idx=frame_idx,
-                image_path=image_path,
-            )
-
-        # Add edges based on maximum similarity between embeddings
+        for track_data in all_tracks_data:
+            unique_track_id = track_data["unique_track_id"]
+            scene_id = track_data["scene_id"]
+            for frame_embedding_data in track_data["frames_data"]:
+                node_attributes = {
+                    "node_id": node_idx_counter,
+                    "unique_track_id": unique_track_id,
+                    "scene_id": scene_id,
+                    **frame_embedding_data # Merges all keys from frame_embedding_data
+                }
+                node_attributes_list.append(node_attributes)
+                
+                G.add_node(
+                    node_idx_counter,
+                    attr_dict=node_attributes # Store all attributes directly on the node
+                )
+                node_idx_counter += 1
+        
+        # Add edges based on similarity between embeddings of different frames
+        # Note: This compares every frame embedding with every other frame embedding.
+        # For N total frame embeddings, this is O(N^2) comparisons.
         with tqdm(
-            total=len(node_data) * (len(node_data) - 1) // 2,
-            desc="Building Graph",
-            unit="edge",
+            total=len(node_attributes_list) * (len(node_attributes_list) - 1) // 2,
+            desc="Building Clustering Graph",
+            unit="edge"
         ) as pbar:
-            for i in range(len(node_data)):
-                for j in range(i + 1, len(node_data)):
-                    similarity = 1 - cosine(
-                        node_data[i][1].flatten(), node_data[j][1].flatten()
-                    )  # Ensure embeddings are 1D
+            for i in range(len(node_attributes_list)):
+                for j in range(i + 1, len(node_attributes_list)):
+                    # embedding is expected to be a numpy array, ensure it's flattened if multi-dimensional.
+                    embedding_i = node_attributes_list[i]["embedding"].flatten()
+                    embedding_j = node_attributes_list[j]["embedding"].flatten()
+                    
+                    similarity = 1 - cosine(embedding_i, embedding_j)
                     if similarity > self.similarity_threshold:
-                        G.add_edge(i, j, weight=similarity)
+                        G.add_edge(node_attributes_list[i]["node_id"], node_attributes_list[j]["node_id"], weight=similarity)
                     pbar.update(1)
 
-        return G, node_data
+        return G, node_attributes_list
 
     def apply_chinese_whispers(self, G: nx.Graph) -> Dict[Any, int]:
         """Apply the Chinese Whispers algorithm to cluster the graph.
@@ -216,98 +244,33 @@ class FaceClusterer:
 
         return labels
 
-    def consolidate_clusters(self, initial_clusters: dict) -> dict:
-        """Consolidate clusters by assigning each face to the best cluster."""
-        # Map to hold the best cluster assignment for each unique_face_id
-        face_best_assignment: Dict[str, int] = {}
-        face_embeddings: Dict[str, List[np.ndarray]] = {}
-        face_data_map: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+    def consolidate_clusters(self, initial_clusters_by_node_id: Dict[int, List[int]], node_attributes_list: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+        """Consolidates clusters by re-mapping node_ids to their full attributes.
+        The core logic of `consolidate_clusters` regarding averaging similarities for 
+        re-assignment based on unique_track_id is removed, as clustering is now done 
+        directly on frame embeddings. Each node is an embedding.
+        The main purpose now is to structure the output nicely.
 
-        # Step 1: Collect all clusters and embeddings for each unique_face_id
-        for cluster_id, face_list in initial_clusters.items():
-            for face_data in face_list:
-                unique_face_id = face_data["unique_face_id"]
-                embedding = face_data["embedding"]
+        Args:
+            initial_clusters_by_node_id: Dict mapping cluster_label to list of node_ids in that cluster.
+            node_attributes_list: Flat list of attributes for each node (embedding).
 
-                if unique_face_id not in face_embeddings:
-                    face_embeddings[unique_face_id] = []
-                    face_data_map[unique_face_id] = []
-                face_embeddings[unique_face_id].append(embedding)
-                face_data_map[unique_face_id].append((cluster_id, face_data))
-
-        # Step 2: For each unique_face_id, consider only the clusters it was assigned to
-        for unique_face_id, embeddings in face_embeddings.items():
-            assigned_clusters = set(
-                cluster_id for cluster_id, _ in face_data_map[unique_face_id]
-            )
-            print(
-                f"Unique Face ID: {unique_face_id}, "
-                f"Assigned Clusters: {assigned_clusters}"
-            )
-
-            best_cluster_id: Union[int, None] = None
-            max_avg_similarity = -1
-
-            if len(assigned_clusters) == 1:
-                best_cluster_id = next(iter(assigned_clusters))
-            else:
-                embeddings_array: np.ndarray = np.array(embeddings)
-                if embeddings_array.ndim == 3 and embeddings_array.shape[1] == 1:
-                    embeddings_array = embeddings_array.reshape(
-                        embeddings_array.shape[0], embeddings_array.shape[2]
-                    )
-
-                if embeddings_array.ndim == 1:
-                    embeddings_array = embeddings_array.reshape(1, -1)
-
-                for cluster_id in assigned_clusters:
-                    # Get embeddings of the cluster
-                    cluster_embeddings = []
-                    for face_data in initial_clusters[cluster_id]:
-                        cluster_embeddings.append(face_data["embedding"])
-                    cluster_embeddings_array: np.ndarray = np.array(cluster_embeddings)
-
-                    if (
-                        cluster_embeddings_array.ndim == 3
-                        and cluster_embeddings_array.shape[1] == 1
-                    ):
-                        cluster_embeddings_array = cluster_embeddings_array.reshape(
-                            cluster_embeddings_array.shape[0],
-                            cluster_embeddings_array.shape[2],
-                        )
-
-                    if cluster_embeddings_array.ndim == 1:
-                        cluster_embeddings_array = cluster_embeddings_array.reshape(
-                            1, -1
-                        )
-
-                    # Step 3: Compute average similarity
-                    similarities = 1 - cdist(
-                        embeddings_array, cluster_embeddings_array, "cosine"
-                    )
-                    avg_similarity = np.mean(similarities)
-
-                    if avg_similarity > max_avg_similarity:
-                        max_avg_similarity = avg_similarity
-                        best_cluster_id = cluster_id
-
-            # Assign the face to the best cluster
-            assert best_cluster_id is not None, "best_cluster_id should not be None"
-            face_best_assignment[unique_face_id] = best_cluster_id
-
-        # Step 4: Build consolidated clusters based on best assignments
-        consolidated_clusters: Dict[int, List[Dict[str, Any]]] = {}
-        for unique_face_id, best_cluster_id in face_best_assignment.items():
-            if best_cluster_id not in consolidated_clusters:
-                consolidated_clusters[best_cluster_id] = []
-
-            # Add all face_data instances for this unique_face_id to the best cluster
-            for cluster_id, face_data in face_data_map[unique_face_id]:
-                # Avoid duplicates
-                if face_data not in consolidated_clusters[best_cluster_id]:
-                    consolidated_clusters[best_cluster_id].append(face_data)
-
-        return consolidated_clusters
+        Returns:
+            Dict[int, List[Dict[str, Any]]]: Consolidated clusters, where keys are cluster_labels
+                                            and values are lists of full attribute dicts for each member.
+        """
+        final_clusters: Dict[int, List[Dict[str, Any]]] = {}
+        for cluster_label, node_ids_in_cluster in initial_clusters_by_node_id.items():
+            if cluster_label not in final_clusters:
+                final_clusters[cluster_label] = []
+            for node_id in node_ids_in_cluster:
+                # Find the node_attributes by node_id
+                # This assumes node_attributes_list is indexed by node_id if node_id starts from 0
+                # Or, create a map if node_ids are not strictly sequential from 0
+                node_attr = next((attr for attr in node_attributes_list if attr["node_id"] == node_id), None)
+                if node_attr:
+                    final_clusters[cluster_label].append(node_attr)
+        return final_clusters
 
     def _max_similarity(
         self, face_list: List[Dict[str, Any]], embedding: np.ndarray
@@ -327,29 +290,26 @@ class FaceClusterer:
         ]
         return max(similarities)
 
-    def cluster_faces(self, face_embeddings: list) -> dict:
-        """Cluster faces based on their embeddings using Chinese Whispers."""
-        G, node_data = self.build_graph(face_embeddings)
-        labels = self.apply_chinese_whispers(G)
+    def cluster_faces(self, all_tracks_data: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+        """Cluster faces based on their embeddings using Chinese Whispers.
+        Each node in the graph is now a single frame embedding.
+        """
+        G, node_attributes_list = self.build_graph(all_tracks_data)
+        if not G.nodes():
+            print("No nodes in graph to cluster. Returning empty clusters.")
+            return {}
+            
+        node_id_to_cluster_label = self.apply_chinese_whispers(G) # Returns {node_id: cluster_label}
 
-        initial_clusters: Dict[int, List[Dict[str, Any]]] = {}
-        for node_idx, label in labels.items():
-            face_data = node_data[node_idx][2]
-            frame_idx = node_data[node_idx][3]
-            image_path = node_data[node_idx][4]
+        # Group node_ids by their cluster_label
+        clusters_by_label: Dict[int, List[int]] = {}
+        for node_id, label in node_id_to_cluster_label.items():
+            if label not in clusters_by_label:
+                clusters_by_label[label] = []
+            clusters_by_label[label].append(node_id)
 
-            if label not in initial_clusters:
-                initial_clusters[label] = []
-
-            initial_clusters[label].append(
-                {
-                    "scene_id": face_data["scene_id"],
-                    "unique_face_id": face_data["unique_face_id"],
-                    "global_face_id": face_data["global_face_id"],
-                    "frame_idx": frame_idx,
-                    "image_path": image_path,  # Include image path in the cluster data
-                    "embedding": node_data[node_idx][1],
-                }
-            )
-
-        return self.consolidate_clusters(initial_clusters)
+        # The old `consolidate_clusters` was more complex due to a different input structure.
+        # Now, it primarily re-maps node_ids back to their full data.
+        # The name "consolidate_clusters" might be a bit strong for its new role, 
+        # but we keep it for consistency unless a major rewrite of that part is done.
+        return self.consolidate_clusters(clusters_by_label, node_attributes_list)

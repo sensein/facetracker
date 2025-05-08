@@ -23,7 +23,7 @@ classifiers = [
 packages = [{include = "facetracker"}]
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = "^3.12"
 click = "^8.1.7"
 filterpy = "^1.4.5"
 numpy = "^1.26.4"
@@ -38,6 +38,7 @@ matplotlib = "^3.9.2"
 pillow = "^10.2.0"
 tqdm = "^4.66.5"
 scenedetect = "^0.6.4"
+mediapipe = "^0.10.14"
 
 [tool.poetry.group.dev]
 optional = true

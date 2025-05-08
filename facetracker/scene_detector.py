@@ -47,6 +47,16 @@ class SceneDetector:
     def detect_scenes(self) -> None:
         """Detect scenes in the video file."""
         self.cap = cv2.VideoCapture(self.video_path)
+        if not self.cap.isOpened():
+            print(f"Warning: Could not open video file {self.video_path} for scene detection.")
+            self.shots = []
+            return
+
+        # Get FPS while the capture object is valid
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0: # Handle potential error where FPS is 0 or negative
+            print(f"Warning: Invalid FPS ({fps}) detected for video {self.video_path}. Using default 30.0.")
+            fps = 30.0
 
         # Enable GPU acceleration in OpenCV (if available)
         if cv2.cuda.getCudaEnabledDeviceCount() > 0:
@@ -56,29 +66,39 @@ class SceneDetector:
         adapter = VideoCaptureAdapter(self.cap)
         if self.scene_manager is not None:
             self.scene_manager.detect_scenes(frame_source=adapter)
-            self.shots = self.get_shot_list()
+            self.shots = self.get_shot_list(fps)
+        else:
+            self.shots = []
+            
         self.cap.release()
 
-    def get_shot_list(self) -> List[Tuple[int, int, float, float]]:
+    def get_shot_list(self, fps: float) -> List[Tuple[int, int, float, float]]:
         """Calculate frame rate and convert frame numbers to seconds.
+
+        Args:
+            fps (float): The frames per second of the video.
 
         Returns:
             List[Tuple[int, int, float, float]]: List of shots with frame numbers
                 and timestamps.
         """
-        if self.cap is None or self.scene_manager is None:
+        if self.scene_manager is None:
             return []
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
+            
         scene_list = self.scene_manager.get_scene_list()
-        shots = [
-            (
-                int(scene[0].get_frames()),
-                int(scene[1].get_frames()),
-                scene[0].get_frames() / fps,
-                scene[1].get_frames() / fps,
-            )
-            for scene in scene_list
-        ]
+        # Check if fps is valid before division
+        if fps <= 0:
+            print("Error: Cannot calculate shot times with invalid FPS.")
+            return []
+            
+        shots = []
+        for scene in scene_list:
+            start_frame = int(scene[0].get_frames())
+            end_frame = int(scene[1].get_frames())
+            # Use the valid fps passed as argument
+            start_time = start_frame / fps
+            end_time = end_frame / fps
+            shots.append((start_frame, end_frame, start_time, end_time))
         return shots
 
     def save_shots(self, output_file: str) -> None:
