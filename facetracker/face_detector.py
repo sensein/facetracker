@@ -5,8 +5,7 @@ import os
 import json
 import cv2
 import numpy as np
-import torch
-from facenet_pytorch import MTCNN # Use MTCNN
+from retinaface import RetinaFace # Use RetinaFace
 import mediapipe as mp             # Keep for FaceLandmarker
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
@@ -17,62 +16,46 @@ from typing import Any, Dict, List, Tuple, Optional # Ensure Optional is importe
 
 class FaceDetector:
     """
-    Detects faces using MTCNN and extracts detailed landmarks using MediaPipe FaceLandmarker.
+    Detects faces using RetinaFace and extracts detailed landmarks using MediaPipe FaceLandmarker.
     """
     def __init__(
         self,
         video_path: str,
-        output_dir: str, # Can be used for MTCNN annotated video or crops
+        output_dir: str, # Can be used for annotated video or crops
         face_landmarker_model_path: str = "face_landmarker.task", # MP model
-        device: str = "cuda" if torch.cuda.is_available() else "cpu", # For MTCNN
-        mtcnn_keep_all: bool = True,
-        mtcnn_min_face_size: int = 20,
-        mtcnn_thresholds: list = [0.6, 0.7, 0.7],
-        mtcnn_factor: float = 0.709,
-        mtcnn_post_process: bool = True,
-        mtcnn_min_confidence: float = 0.9, # Min confidence for MTCNN detection to process further
+        face_min_confidence: float = 0.9, # Min confidence for RetinaFace detection
         mp_min_face_presence_confidence: float = 0.5, # MP Landmarker threshold
-        padding_factor: float = 0.2 # Factor to expand MTCNN bbox for landmark detection crop
+        padding_factor: float = 0.2 # Factor to expand RetinaFace bbox for landmark detection crop
     ):
         """
-        Initializes the FaceDetector with MTCNN and MediaPipe FaceLandmarker.
+        Initializes the FaceDetector with RetinaFace and MediaPipe FaceLandmarker.
 
         Args:
             video_path (str): Path to the input video file.
             output_dir (str): Directory for optional output files.
             face_landmarker_model_path (str): Path to the MediaPipe FaceLandmarker model bundle.
-            device (str): Device for MTCNN ('cuda' or 'cpu').
-            mtcnn_keep_all (bool): MTCNN keep_all flag.
-            mtcnn_min_face_size (int): MTCNN min_face_size.
-            mtcnn_thresholds (list): MTCNN thresholds.
-            mtcnn_factor (float): MTCNN factor.
-            mtcnn_post_process (bool): MTCNN post_process flag.
-            mtcnn_min_confidence (float): Minimum confidence score from MTCNN to accept the detection.
+            face_min_confidence (float): Minimum confidence score from RetinaFace to accept the detection.
             mp_min_face_presence_confidence (float): Min presence confidence for MP FaceLandmarker
                                                       on the cropped face image.
-            padding_factor (float): How much to expand the MTCNN bounding box before
+            padding_factor (float): How much to expand the RetinaFace bounding box before
                                     feeding the crop to FaceLandmarker.
         """
         self.video_path = video_path
         self.output_dir = output_dir
-        self.device = device
         self.padding_factor = padding_factor
-        self.mtcnn_min_confidence = mtcnn_min_confidence
+        self.face_min_confidence = face_min_confidence
 
-        print(f"Initializing MTCNN on device: {self.device}")
-        # Check if CUDA device is actually available if specified
-        if "cuda" in self.device and not torch.cuda.is_available():
-            print(f"Warning: CUDA specified but not available. Falling back to CPU for MTCNN.")
-            self.device = "cpu"
-            
-        self.mtcnn = MTCNN(
-            keep_all=mtcnn_keep_all,
-            min_face_size=mtcnn_min_face_size,
-            thresholds=mtcnn_thresholds,
-            factor=mtcnn_factor,
-            post_process=mtcnn_post_process,
-            device=self.device
-        )
+        print("Initializing RetinaFace...")
+        try:
+            # Eagerly load the RetinaFace model.
+            # RetinaFace library (serengil/retinaface) uses TensorFlow backend
+            # and typically auto-detects GPU if available and configured.
+            RetinaFace.build_model() 
+            print("RetinaFace model pre-loaded.")
+        except Exception as e:
+            print(f"Warning: Could not pre-load RetinaFace model: {e}. It will be loaded on first use.")
+            # Depending on the library, an error here might mean subsequent calls also fail.
+            # For serengil/retinaface, this call helps avoid delay on first frame.
 
         print("Initializing MediaPipe FaceLandmarker...")
         self.landmarker = None
@@ -116,39 +99,46 @@ class FaceDetector:
         self, frame: np.ndarray
     ) -> List[Dict[str, Any]]:
         """
-        Detect faces with MTCNN, then extract landmarks with FaceLandmarker on crops.
+        Detect faces with RetinaFace, then extract landmarks with FaceLandmarker on crops.
 
         Args:
             frame (np.ndarray): Input frame (BGR).
 
         Returns:
             List[Dict[str, Any]]: List of detected face data. Each dict contains:
-                'bbox' (from MTCNN, [x1, y1, x2, y2]), 
-                'confidence' (from MTCNN),
+                'bbox' (from RetinaFace, [x1, y1, x2, y2]),
+                'confidence' (from RetinaFace),
                 'landmarks' (detailed 478 landmarks from FaceLandmarker, normalized to frame, or None).
         """
         faces_data = []
         frame_height, frame_width = frame.shape[:2]
         
-        # --- Stage 1: MTCNN Detection --- 
-        # MTCNN expects RGB PIL Image or numpy array. Convert frame.
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # Note: MTCNN can be slow, especially on CPU for large frames.
-        # Consider resizing frame if performance is an issue, but adjust coordinates back.
-        boxes, probs = self.mtcnn.detect(rgb_frame, landmarks=False) # landmarks=False is faster
+        # --- Stage 1: RetinaFace Detection --- 
+        # RetinaFace.detect_faces expects BGR numpy array and applies threshold internally.
+        # It returns a dictionary: {'face_1': {'score': S, 'facial_area': [x1,y1,x2,y2], ...}, ...}
+        detected_faces_retina = {}
+        try:
+            # The threshold is applied by RetinaFace.detect_faces directly.
+            raw_detections = RetinaFace.detect_faces(frame, threshold=self.face_min_confidence)
+            if isinstance(raw_detections, dict): # Standard output format
+                 detected_faces_retina = raw_detections
+            # If raw_detections is empty or not a dict (e.g. due to error or no faces), loop won't run.
+        except Exception as e:
+            print(f"RetinaFace detection failed for a frame: {e}")
+            # detected_faces_retina remains {}
 
-        if boxes is not None:
-            for box, prob in zip(boxes, probs):
-                # Ensure prob is not None before comparison
-                if prob is None or prob < self.mtcnn_min_confidence:
-                    continue
+        if detected_faces_retina: # Check if dict is not empty
+            for face_key, face_data_retina in detected_faces_retina.items():
+                prob = face_data_retina['score']
+                # Confidence check already done by RetinaFace.detect_faces with its threshold parameter
 
-                # MTCNN returns box as [x1, y1, x2, y2]
-                x1, y1, x2, y2 = map(int, box)
+                # RetinaFace returns 'facial_area' as [x1, y1, x2, y2]
+                box_rf = face_data_retina['facial_area'] 
+                x1, y1, x2, y2 = map(int, box_rf)
 
                 # Ensure box coordinates are valid before padding/cropping
                 if x1 >= x2 or y1 >= y2 or x1 < 0 or y1 < 0 or x2 > frame_width or y2 > frame_height:
-                    # print(f"Warning: Skipping invalid MTCNN box {box}")
+                    # print(f"Warning: Skipping invalid RetinaFace box {box_rf}")
                     continue
 
                 # Add padding to the bounding box for the landmark crop
@@ -164,13 +154,13 @@ class FaceDetector:
 
                 # Ensure crop coordinates are valid after padding
                 if crop_x1 >= crop_x2 or crop_y1 >= crop_y2:
-                    # print(f"Warning: Skipping invalid padded crop area for box {box}")
+                    # print(f"Warning: Skipping invalid padded crop area for box {box_rf}")
                     continue
 
                 face_crop_bgr = frame[crop_y1:crop_y2, crop_x1:crop_x2]
 
                 if face_crop_bgr.size == 0:
-                    # print(f"Warning: Skipping empty face crop for box {box}")
+                    # print(f"Warning: Skipping empty face crop for box {box_rf}")
                     continue # Skip if crop is empty
 
                 # --- Stage 2: MediaPipe FaceLandmarker on Crop --- 
@@ -194,20 +184,19 @@ class FaceDetector:
                         # print(f"Warning: FaceLandmarker failed on a crop: {e}")
                         pass # Continue without detailed landmarks if MP fails
 
-                # Store result if MTCNN detection was good
+                # Store result if RetinaFace detection was good
                 current_face_data = {
-                    # Bbox from MTCNN [x1,y1,x2,y2] - ensure they are floats for consistency/JSON
-                    "bbox": [float(b) for b in box],
-                    "confidence": float(prob),      # Confidence from MTCNN
+                    # Bbox from RetinaFace [x1,y1,x2,y2] - ensure they are floats
+                    "bbox": [float(b) for b in box_rf], 
+                    "confidence": float(prob),      # Confidence from RetinaFace
                     "landmarks": detailed_landmarks_transformed # Detailed 478 landmarks (normalized to frame) or None
                 }
                 faces_data.append(current_face_data)
-
         return faces_data
 
 
     def detect_faces_in_video(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Detect faces (MTCNN) and landmarks (MediaPipe) in the video."""
+        """Detect faces (RetinaFace) and landmarks (MediaPipe) in the video."""
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             raise ValueError(f"Error opening video file: {self.video_path}")
@@ -219,7 +208,7 @@ class FaceDetector:
             print("Warning: Could not determine total frames. Progress bar may be inaccurate.")
             total_frames = None
 
-        pbar = tqdm(total=total_frames, desc="Detecting Faces (MTCNN+MP)")
+        pbar = tqdm(total=total_frames, desc="Detecting Faces (RetinaFace+MP)")
 
         while True:
             ret, frame = cap.read()
@@ -259,6 +248,8 @@ class FaceDetector:
              except Exception as e:
                  print(f"Ignoring generic error closing FaceLandmarker in close: {e}")
          # MTCNN doesn't typically require explicit closing
+         # RetinaFace (TensorFlow backend) also generally doesn't require explicit model closing here.
+         # TensorFlow session management handles its resources.
 
     def __del__(self):
         """Ensure resources are cleaned up."""

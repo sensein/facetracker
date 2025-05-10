@@ -3,7 +3,6 @@ import numpy as np
 import os
 from typing import Dict, List, Any, Optional
 from tqdm import tqdm
-import torch
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 import pandas as pd
@@ -293,7 +292,12 @@ class Sort(object):
         return(o)
 
 class FaceTracker:
-    def __init__(self, max_age: int = 1, min_hits: int = 3, iou_threshold: float = 0.5):
+    def __init__(self, max_age: int = 30, min_hits: int = 10, iou_threshold: float = 0.6):
+        """
+        max_age: Maximum number of frames to keep a track without associated detections.
+        min_hits: Minimum number of detections before a track is considered valid.
+        iou_threshold: IoU threshold for matching detections to existing tracks.
+        """
         self.sort_tracker = Sort(max_age=max_age, min_hits=min_hits, iou_threshold=iou_threshold)
 
     def track_faces(self, frame: int, face_data: List[Dict[str, Any]], img_size: tuple) -> List[Dict[str, Any]]:
@@ -360,7 +364,7 @@ class FrameSelector:
         min_pose_detection_confidence: float = 0.5,
         min_pose_presence_confidence: float = 0.5,
         min_pose_tracking_confidence: float = 0.5, # For VIDEO mode, not used here
-        face_to_pose_iou_threshold: float = 0.3,
+        face_to_pose_iou_threshold: float = 0.5,
     ):
         self.video_file = video_file
         self.top_n = top_n
