@@ -1,0 +1,29 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/tensorflow:25.02-tf2-py3
+
+%help
+    Facetracker application container.
+    and installs additional dependencies for the facetracker project using pip from requirements.txt.
+
+%files
+    # Copy your entire project (including the new requirements.txt)
+    /home/yibei/facetracker /opt/facetracker 
+
+%post
+    echo "Installing system dependencies for OpenCV..."
+    apt-get update && apt-get install -y libx11-6 libxext6
+
+    echo "Starting build: Updating pip and installing dependencies from requirements.txt..."
+    python3 -m pip install --upgrade pip
+    
+    echo "Installing facetracker application-specific dependencies..."
+    cd /opt/facetracker
+    python3 -m pip install --no-cache-dir -r requirements.txt # Use --no-cache-dir for cleaner install
+
+    echo "Build post-installation complete."
+
+%environment
+    export PYTHONPATH=/opt/facetracker:$PYTHONPATH
+
+%runscript
+    echo "Facetracker Apptainer Image. Use 'apptainer exec -nv <image_name.sif> python3 /opt/facetracker/scripts/your_script.py [args]" 
