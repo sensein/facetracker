@@ -299,60 +299,150 @@ class FaceTracker:
         iou_threshold: IoU threshold for matching detections to existing tracks.
         """
         self.sort_tracker = Sort(max_age=max_age, min_hits=min_hits, iou_threshold=iou_threshold)
+        print(f"FaceTracker initialized with Sort: max_age={max_age}, min_hits={min_hits}, iou_thresh={iou_threshold}")
 
-    def track_faces(self, frame: int, face_data: List[Dict[str, Any]], img_size: tuple) -> List[Dict[str, Any]]:
+    def track_faces(self, 
+                    all_augmented_data_by_frame_str: Dict[str, List[Dict[str, Any]]], 
+                    video_width: int, 
+                    video_height: int) -> List[Dict[str, Any]]:
         """
-        Tracks faces using the SORT algorithm and includes associated landmark data.
+        Tracks faces using the SORT algorithm across all provided frames.
+        Assumes the entire video is processed as a single logical sequence or scene ("scene_0").
 
         Args:
-            frame (int): The current frame number.
-            face_data (List[Dict[str, Any]]): List of detections for the current frame.
-                Each dict should have 'bbox' ([x1, y1, x2, y2]), 'confidence',
-                and 'landmarks'.
-            img_size (tuple): The size of the image frame (height, width).
+            all_augmented_data_by_frame_str (Dict[str, List[Dict[str, Any]]]): 
+                Data from PersonAssociator. Keys are frame_id strings (e.g., "frame_0", "frame_10"),
+                values are lists of augmented face detection dictionaries for that frame.
+                Each dict should have 'bbox', 'confidence', and other associated data like 
+                'landmarks', 'full_body_pose_landmarks', etc.
+            video_width (int): Width of the video frames.
+            video_height (int): Height of the video frames.
 
         Returns:
-            List[Dict[str, Any]]: List of tracked faces for the current frame.
-                Each dict contains 'id' (track_id), 'frame', 'bbox', 'confidence',
-                and 'landmarks'.
+            List[Dict[str, Any]]: A list of tracked face instances. Each instance dictionary contains:
+                'id' (track_id), 'frame' (frame_idx), 'bbox', 'confidence', 
+                and all other data carried from the input augmented_face_dict 
+                (e.g., 'landmarks', 'full_body_pose_landmarks').
         """
-        detections_for_sort = []
-        landmarks_for_detections = []
-        if face_data:
-            for face in face_data:
-                detections_for_sort.append([*face['bbox'], face['confidence']])
-                landmarks_for_detections.append(face.get('landmarks')) # Use .get for safety
-            detections_np = np.array(detections_for_sort)
-        else:
-            detections_np = np.empty((0, 5))
-            
-        # Update SORT tracker, passing landmarks as associated data
-        # Sort returns: [[x1, y1, x2, y2, track_id, confidence], ...]
-        tracked_faces_array = self.sort_tracker.update(detections_np, img_size, detections_associated_data=landmarks_for_detections)
-        
-        result = []
-        if tracked_faces_array.shape[0] > 0:
-            # Create a mapping from sort_tracker's internal trk.id to its latest_associated_data
-            tracker_id_to_landmarks = {trk.id: trk.latest_associated_data for trk in self.sort_tracker.trackers}
+        tracked_output_list = []
+        img_size = (video_height, video_width)
 
-            for face_output in tracked_faces_array:
-                track_id = int(face_output[4])
-                face_info = {
-                    "id": track_id,
-                    "frame": frame,
-                    "bbox": face_output[:4].tolist(),
-                    "confidence": face_output[5],
-                    "landmarks": tracker_id_to_landmarks.get(track_id) # Get landmarks using track_id
-                }
-                result.append(face_info)
+        # Sort frame keys numerically for correct processing order
+        # Assuming frame keys are like "frame_0", "frame_1", "frame_10", ...
+        sorted_frame_keys = sorted(
+            all_augmented_data_by_frame_str.keys(),
+            key=lambda x: int(x.split('_')[-1])
+        )
         
-        return result
+        print(f"FaceTracker processing {len(sorted_frame_keys)} frames...")
+
+        for frame_key_str in tqdm(sorted_frame_keys, desc="Tracking faces frame-by-frame"):
+            current_frame_idx = int(frame_key_str.split('_')[-1])
+            augmented_faces_in_frame_list = all_augmented_data_by_frame_str.get(frame_key_str, [])
+
+            detections_for_sort_np = []
+            # associated_data_for_sort will be a list of the original augmented dicts
+            associated_data_for_sort = []
+
+            if augmented_faces_in_frame_list:
+                for aug_face_dict in augmented_faces_in_frame_list:
+                    # Ensure required keys are present, provide defaults if necessary
+                    bbox = aug_face_dict.get('bbox')
+                    confidence = aug_face_dict.get('confidence', 0.5) # Default confidence if missing
+
+                    if bbox is None:
+                        print(f"Warning: Missing 'bbox' in face data for frame {current_frame_idx}. Skipping this detection.")
+                        continue
+                    
+                    detections_for_sort_np.append([*bbox, confidence])
+                    associated_data_for_sort.append(aug_face_dict) # Pass the whole dict
+            
+            if not detections_for_sort_np: # No valid detections for sort in this frame
+                detections_np = np.empty((0, 5))
+            else:
+                detections_np = np.array(detections_for_sort_np)
+
+            # Update SORT tracker
+            # Sort.update returns: [[x1, y1, x2, y2, track_id, confidence], ...]
+            tracked_bboxes_array = self.sort_tracker.update(
+                detections_np, 
+                img_size, 
+                detections_associated_data=associated_data_for_sort
+            )
+            
+            if tracked_bboxes_array.shape[0] > 0:
+                # Create a mapping from sort_tracker's internal trk.id to its latest_associated_data
+                # This latest_associated_data is the complete aug_face_dict we passed in.
+                tracker_id_to_full_data_map = {
+                    trk.id: trk.latest_associated_data 
+                    for trk in self.sort_tracker.trackers 
+                    if trk.latest_associated_data is not None # Ensure data exists
+                }
+
+                for track_info_array in tracked_bboxes_array:
+                    track_id = int(track_info_array[4])
+                    
+                    # Retrieve the full associated data dictionary for this track_id
+                    full_associated_data = tracker_id_to_full_data_map.get(track_id)
+
+                    if full_associated_data is None:
+                        # This can happen if a tracker was predicted but not updated with a new detection
+                        # in the current frame, but it's still considered active by Sort.
+                        # Or if a new track was created from a detection for which we didn't have full_associated_data
+                        # (though our logic above tries to ensure associated_data_for_sort mirrors detections_for_sort_np).
+                        # For now, we'll skip if we can't find the rich data, or fill with basics.
+                        # A more robust handling might involve carrying forward the *last known good data* for a track.
+                        # print(f"Warning: No full associated data found for track_id {track_id} in frame {current_frame_idx}. Using basic info.")
+                        # For now, we'll just use what SORT gives us and not add other fields.
+                        # This means landmarks, pose, etc., might be missing for such instances.
+                        # A better approach for Sort might be to ensure KalmanBoxTracker.latest_associated_data
+                        # persists across predictions if not updated.
+                        
+                        # Let's construct a minimal entry if full_associated_data is missing
+                        # but the track is valid according to Sort.
+                        # The 'latest_associated_data' on the KalmanBoxTracker should hold the data from its *last update*.
+                        
+                        # Try to find the tracker directly to get its latest_associated_data
+                        target_tracker = next((trk for trk in self.sort_tracker.trackers if trk.id == track_id), None)
+                        if target_tracker and target_tracker.latest_associated_data:
+                            full_associated_data = target_tracker.latest_associated_data
+                        else:
+                            # print(f"Debug: Still no data for track {track_id} in frame {current_frame_idx}")
+                            # Fallback: create a very basic entry
+                            tracked_instance = {
+                                "id": track_id,
+                                "frame": current_frame_idx,
+                                "bbox": track_info_array[:4].tolist(),
+                                "confidence": track_info_array[5],
+                                # Other fields will be missing
+                            }
+                            tracked_output_list.append(tracked_instance)
+                            continue # Skip to next track_info_array entry
+
+                    # If full_associated_data was found (it should be the aug_face_dict)
+                    tracked_instance = {
+                        "id": track_id,
+                        "frame": current_frame_idx, # Current frame index
+                        "bbox": track_info_array[:4].tolist(), # Bbox from SORT
+                        "confidence": track_info_array[5],   # Confidence from SORT (matches detection)
+                        # Carry over all other data from the associated augmented face dictionary
+                        **full_associated_data 
+                    }
+                    # Ensure 'bbox' and 'confidence' in tracked_instance are from SORT's output,
+                    # as full_associated_data might have the original detection's bbox/confidence.
+                    # The spread operator `**full_associated_data` might overwrite these if keys are same.
+                    # Let's re-assign them to be sure.
+                    tracked_instance['bbox'] = track_info_array[:4].tolist()
+                    tracked_instance['confidence'] = track_info_array[5]
+                    
+                    tracked_output_list.append(tracked_instance)
+        
+        return tracked_output_list
 
 class FrameSelector:
-    # Define constants for head landmarks from MediaPipe Pose (BlazePose 33 landmarks)
-    # These are: Nose, Left Eye (inner, center, outer), Right Eye (inner, center, outer), Left Ear, Right Ear, Mouth Left, Mouth Right
-    # We'll use a bounding box derived from a wider set: eyes, ears, mouth, shoulders to be safer for head region.
-    POSE_HEAD_LANDMARK_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # Nose, Eyes, Ears, Mouth
+    # POSE_HEAD_LANDMARK_INDICES and related methods like _get_pose_head_bbox, _get_best_matching_pose_landmarks are removed.
+    # _calculate_iou might be kept if it's used for other purposes, or moved/removed.
+    # For now, let's assume _calculate_iou was only for pose matching and remove it too.
 
     def __init__(
         self,
@@ -360,38 +450,20 @@ class FrameSelector:
         top_n: int = 3,
         output_dir: Optional[str] = None,
         save_images: bool = True,
-        pose_model_asset_path: str = "pose_landmarker_lite.task", # Placeholder
-        min_pose_detection_confidence: float = 0.5,
-        min_pose_presence_confidence: float = 0.5,
-        min_pose_tracking_confidence: float = 0.5, # For VIDEO mode, not used here
-        face_to_pose_iou_threshold: float = 0.5,
+        # Removed pose_model_asset_path and other pose-specific __init__ args
     ):
         self.video_file = video_file
         self.top_n = top_n
         self.output_dir = output_dir
         self.save_images = save_images
-        self.face_to_pose_iou_threshold = face_to_pose_iou_threshold
+        # Removed self.face_to_pose_iou_threshold
 
         if save_images and output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        # Initialize PoseLandmarker
-        try:
-            pose_base_options = mp_python_tasks.BaseOptions(model_asset_path=pose_model_asset_path)
-            pose_options = mp_vision.PoseLandmarkerOptions(
-                base_options=pose_base_options,
-                running_mode=mp_vision.RunningMode.IMAGE,
-                num_poses=5, # Max number of poses to detect in a frame
-                min_pose_detection_confidence=min_pose_detection_confidence,
-                min_pose_presence_confidence=min_pose_presence_confidence,
-                min_tracking_confidence=min_pose_tracking_confidence,
-                output_segmentation_masks=False,
-            )
-            self.pose_landmarker = mp_vision.PoseLandmarker.create_from_options(pose_options)
-            print("MediaPipe PoseLandmarker initialized successfully.")
-        except Exception as e:
-            print(f"Error initializing MediaPipe PoseLandmarker: {e}. Pose estimation will be skipped.")
-            self.pose_landmarker = None
+        # Removed PoseLandmarker initialization
+        # self.pose_landmarker = None 
+        print("FrameSelector initialized (pose estimation is now external).")
 
     @staticmethod
     def calculate_brightness(image: np.ndarray) -> float:
@@ -405,149 +477,94 @@ class FrameSelector:
         self, face_image: np.ndarray, scene_id: str, track_id: int, frame_idx: int
     ) -> Optional[str]:
         if self.output_dir and self.save_images:
-            # Use scene_id and track_id for a more unique filename
             save_filename = f"scene_{scene_id}_track_{track_id}_frame_{frame_idx}.jpg"
             save_path = os.path.join(self.output_dir, save_filename)
             cv2.imwrite(save_path, face_image)
             return save_filename
         return None
 
-    @staticmethod
-    def _calculate_iou(boxA: List[int], boxB: List[int]) -> float:
-        """Calculate Intersection over Union (IoU) between two bounding boxes.
-        Boxes are [x1, y1, x2, y2].
-        """
-        xA = max(boxA[0], boxB[0])
-        yA = max(boxA[1], boxB[1])
-        xB = min(boxA[2], boxB[2])
-        yB = min(boxA[3], boxB[3])
+    def save_segmentation_outputs(
+        self,
+        full_frame_bgr: np.ndarray,
+        segmentation_mask_float: np.ndarray,
+        scene_id: str,
+        track_id: int,
+        frame_idx: int,
+        mask_threshold: float = 0.5
+    ) -> Dict[str, Optional[str]]:
+        """Saves segmentation mask, segmented person, and isolated background."""
+        output_paths = {
+            "segmentation_mask_path": None,
+            "segmented_person_path": None,
+            "isolated_background_path": None,
+        }
+        if not self.output_dir or not self.save_images or segmentation_mask_float is None:
+            return output_paths
 
-        interArea = max(0, xB - xA) * max(0, yB - yA)
-        if interArea == 0:
-            return 0.0
+        try:
+            # 1. Threshold the float mask to get a binary mask (0 or 1)
+            binary_mask_01 = (segmentation_mask_float > mask_threshold).astype(np.uint8)
 
-        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-        
-        iou = interArea / float(boxAArea + boxBArea - interArea)
-        return iou
+            if binary_mask_01.ndim != 2:
+                print(f"Warning: Segmentation mask for S:{scene_id}, T:{track_id}, F:{frame_idx} is not 2D. Skipping save.")
+                return output_paths
+            if full_frame_bgr.shape[:2] != binary_mask_01.shape[:2]:
+                print(f"Warning: Frame and mask dimensions mismatch for S:{scene_id}, T:{track_id}, F:{frame_idx}. Resizing mask.")
+                binary_mask_01 = cv2.resize(binary_mask_01, (full_frame_bgr.shape[1], full_frame_bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+                binary_mask_01 = (binary_mask_01 > 0).astype(np.uint8) # Ensure still 0/1 after resize
 
-    def _get_pose_head_bbox(
-        self, 
-        pose_landmarks: List[landmark_pb2.NormalizedLandmark], # Use landmark_pb2 type hint
-        frame_width: int, 
-        frame_height: int
-    ) -> Optional[List[int]]:
-        """Derive a head bounding box from pose landmarks."""
-        if not pose_landmarks:
-            return None
-            
-        head_x_coords = []
-        head_y_coords = []
-        
-        for idx in self.POSE_HEAD_LANDMARK_INDICES:
-            if idx < len(pose_landmarks):
-                landmark = pose_landmarks[idx]
-                # Check landmark visibility before using it for bbox calculation
-                if hasattr(landmark, 'visibility') and landmark.visibility < 0.7: # Visibility threshold
-                    continue
-                head_x_coords.append(landmark.x * frame_width)
-                head_y_coords.append(landmark.y * frame_height)
-        
-        if not head_x_coords or not head_y_coords: # If no visible landmarks formed the list
-            return None
+            # Save the binary mask (as a 0/255 image)
+            mask_filename = f"scene_{scene_id}_track_{track_id}_frame_{frame_idx}_human_mask.png"
+            mask_save_path = os.path.join(self.output_dir, mask_filename)
+            cv2.imwrite(mask_save_path, binary_mask_01 * 255)
+            output_paths["segmentation_mask_path"] = mask_filename
 
-        x1 = int(min(head_x_coords))
-        y1 = int(min(head_y_coords))
-        x2 = int(max(head_x_coords))
-        y2 = int(max(head_y_coords))
-        
-        # Ensure valid box
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(frame_width - 1, x2)
-        y2 = min(frame_height - 1, y2)
+            # 2. Segmented Person (person on black background)
+            # The mask for bitwise_and should be single channel, 8-bit. binary_mask_01 is suitable.
+            segmented_person = cv2.bitwise_and(full_frame_bgr, full_frame_bgr, mask=binary_mask_01)
+            person_filename = f"scene_{scene_id}_track_{track_id}_frame_{frame_idx}_segmented_person.jpg"
+            person_save_path = os.path.join(self.output_dir, person_filename)
+            cv2.imwrite(person_save_path, segmented_person)
+            output_paths["segmented_person_path"] = person_filename
 
-        if x1 >= x2 or y1 >= y2:
-            return None
-            
-        return [x1, y1, x2, y2]
+            # 3. Isolated Background (background with person area blacked out)
+            inverted_binary_mask_01 = 1 - binary_mask_01 # Person is 0, background is 1
+            isolated_background = cv2.bitwise_and(full_frame_bgr, full_frame_bgr, mask=inverted_binary_mask_01)
+            background_filename = f"scene_{scene_id}_track_{track_id}_frame_{frame_idx}_isolated_background.jpg"
+            background_save_path = os.path.join(self.output_dir, background_filename)
+            cv2.imwrite(background_save_path, isolated_background)
+            output_paths["isolated_background_path"] = background_filename
 
-    def _get_best_matching_pose_landmarks(
-        self, 
-        face_bbox: List[int], 
-        pose_landmarker_result: mp_vision.PoseLandmarkerResult, 
-        frame_width: int, 
-        frame_height: int
-    ) -> Optional[List[List[float]]]:
-        """Find the body pose best matching the given face_bbox."""
-        if not self.pose_landmarker or not pose_landmarker_result.pose_landmarks:
-            return None
-
-        best_iou = 0.0
-        matched_pose_world_landmarks_xyzv = None # Store world landmarks if available, else normalized
-        matched_pose_normalized_landmarks_xyzv = None
-
-
-        for pose_idx, single_pose_normalized_landmarks in enumerate(pose_landmarker_result.pose_landmarks):
-            # Type hint for iterated item can implicitly use the pb2 type if needed, but let's ensure clarity
-            # The object itself might be a container, but we access attributes like pb2
-            pose_head_bbox = self._get_pose_head_bbox(single_pose_normalized_landmarks, frame_width, frame_height)
-            if not pose_head_bbox:
-                continue
-
-            iou = self._calculate_iou(face_bbox, pose_head_bbox)
-
-            if iou > best_iou:
-                best_iou = iou
-                # Store all normalized landmarks for the best matching pose
-                matched_pose_normalized_landmarks_xyzv = [[lm.x, lm.y, lm.z, lm.visibility if hasattr(lm, 'visibility') else 1.0] for lm in single_pose_normalized_landmarks]
-                
-                # If world landmarks are available (they usually are with PoseLandmarker)
-                if pose_landmarker_result.pose_world_landmarks and pose_idx < len(pose_landmarker_result.pose_world_landmarks):
-                    single_pose_world_landmarks = pose_landmarker_result.pose_world_landmarks[pose_idx]
-                    matched_pose_world_landmarks_xyzv = [[lm.x, lm.y, lm.z, lm.visibility if hasattr(lm, 'visibility') else 1.0] for lm in single_pose_world_landmarks]
-
-
-        if best_iou >= self.face_to_pose_iou_threshold:
-            # Prioritize returning world landmarks if available, else normalized
-            return matched_pose_world_landmarks_xyzv if matched_pose_world_landmarks_xyzv else matched_pose_normalized_landmarks_xyzv
-        return None
+        except Exception as e:
+            print(f"Error saving segmentation outputs for S:{scene_id}, T:{track_id}, F:{frame_idx}: {e}")
+        return output_paths
 
     def select_top_frames_per_face(
         self, tracked_data_by_scene: Dict[str, List[Dict[str, Any]]]
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Selects the top N frames for each tracked face based on quality metrics.
-
-        Args:
-            tracked_data_by_scene (Dict[str, List[Dict[str, Any]]]): 
-                A dictionary where keys are scene_ids and values are lists of face entries.
-                Each face entry is a dict from FaceTracker, expected to contain:
-                'id' (local track ID), 'frame' (frame_idx), 'bbox',
-                'confidence', and 'landmarks' (pre-extracted from FaceDetector).
-        
-        Returns:
-            Dict[str, List[Dict[str, Any]]]: 
-                Selected frames grouped by scene_id. Each list item contains:
-                'unique_track_id': A string f"{scene_id}_{local_track_id}".
-                'top_frames': List of dicts, each with 'frame_idx', 'total_score',
-                              'face_coord', 'image_path', and 'face_mesh' (landmarks).
+        Expects that 'full_body_pose_landmarks' (and optionally 'matched_pose_head_bbox', 'face_pose_iou')
+        are already present in each face_entry if pose data is needed.
         """
         cap = cv2.VideoCapture(self.video_file)
-        # Stores data for each unique track instance: (scene_id, local_track_id) -> list_of_frame_data
         unique_track_instances_data: Dict[tuple, List[Dict[str, Any]]] = {}
-
         total_face_entries = sum(len(faces) for faces in tracked_data_by_scene.values())
 
-        with tqdm(total=total_face_entries, desc="Frame Selection & Pose Estimation") as pbar:
+        with tqdm(total=total_face_entries, desc="Frame Selection (Pose Data Pre-Associated)") as pbar:
             for scene_id, scene_face_entries in tracked_data_by_scene.items():
                 for face_entry in scene_face_entries:
                     local_track_id = face_entry["id"]
                     frame_idx = face_entry["frame"]
-                    face_coords = face_entry["bbox"] 
+                    face_coords = face_entry["bbox"]
                     confidence = face_entry["confidence"]
                     face_landmarks = face_entry.get("landmarks")
+                    
+                    # Retrieve pre-associated pose data
+                    full_body_pose_data = face_entry.get("full_body_pose_landmarks")
+                    # matched_pose_head_bbox = face_entry.get("matched_pose_head_bbox") # If needed by other logic
+                    # face_pose_iou = face_entry.get("face_pose_iou") # If needed for scoring
+                    human_segmentation_mask_data = face_entry.get("human_segmentation_mask")
 
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                     ret, frame = cap.read()
@@ -558,45 +575,27 @@ class FrameSelector:
                     
                     height, width = frame.shape[:2]
                     
-                    # --- Full Body Pose Estimation ---
-                    full_body_pose_data = None
-                    if self.pose_landmarker:
-                        try:
-                            # Convert BGR frame to RGB then to MediaPipe Image
-                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            mp_full_frame_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                            pose_landmarker_result = self.pose_landmarker.detect(mp_full_frame_image)
-                            
-                            full_body_pose_data = self._get_best_matching_pose_landmarks(
-                                face_coords, pose_landmarker_result, width, height
-                            )
-                        except Exception as e:
-                            print(f"Error during pose estimation for frame {frame_idx}: {e}")
-                    # --- End Full Body Pose Estimation ---
+                    # --- Full Body Pose Estimation section is REMOVED ---
 
                     x1_f, y1_f, x2_f, y2_f = map(int, face_coords)
                     x1_f, y1_f = max(0, x1_f), max(0, y1_f)
                     x2_f, y2_f = min(width - 1, x2_f), min(height - 1, y2_f)
 
                     if x1_f >= x2_f or y1_f >= y2_f:
-                        print(f"Warning: Invalid crop dimensions for scene {scene_id}, track {local_track_id}, frame {frame_idx}. Skipping.")
-                        pbar.update(1)
-                        continue
+                        pbar.update(1); continue
                         
                     face_image = frame[y1_f:y2_f, x1_f:x2_f]
                     if face_image.size == 0:
-                        print(f"Warning: Empty face image for scene {scene_id}, track {local_track_id}, frame {frame_idx}. Skipping.")
-                        pbar.update(1)
-                        continue
+                        pbar.update(1); continue
                     
                     gray_face = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
-                    face_size = (x2_f - x1_f) * (y2_f - y1_f) # Use face crop dimensions
+                    face_size = (x2_f - x1_f) * (y2_f - y1_f)
                     brightness = self.calculate_brightness(gray_face)
                     blurriness = self.calculate_blurriness(gray_face)
-
                     frame_area = width * height
                     normalized_face_size = face_size / frame_area if frame_area > 0 else 0
                     normalized_brightness = brightness / 255.0
+                    # Ensure blurriness does not lead to division by zero or negative scores if too low
                     normalized_blurriness = blurriness / (blurriness + 1e-6) if blurriness > 1e-6 else 0 
 
                     score = (
@@ -604,22 +603,37 @@ class FrameSelector:
                         + 0.5 * normalized_face_size
                         + 0.3 * normalized_brightness
                         - 0.2 * normalized_blurriness 
+                        # Consider if face_pose_iou or presence of full_body_pose_data should affect the score
+                        # For example: if full_body_pose_data: score += 0.1 
                     )
                     
                     relative_path = self.save_cropped_face(face_image, scene_id, local_track_id, frame_idx)
-
+                    
+                    segmentation_outputs_paths = {} # Initialize
+                    if human_segmentation_mask_data is not None and self.save_images:
+                        # 'frame' is the full BGR frame from cap.read()
+                        segmentation_outputs_paths = self.save_segmentation_outputs(
+                            frame, human_segmentation_mask_data, scene_id, local_track_id, frame_idx
+                        )
+                        
                     unique_track_key = (scene_id, local_track_id)
                     if unique_track_key not in unique_track_instances_data:
                         unique_track_instances_data[unique_track_key] = []
 
-                    unique_track_instances_data[unique_track_key].append({
+                    frame_data_for_track = {
                         "frame_idx": frame_idx,
                         "total_score": score,
                         "face_coord": face_coords,
-                        "image_path": relative_path,
-                        "face_mesh": face_landmarks, 
-                        "full_body_pose": full_body_pose_data # Add full body pose
-                    })
+                        "image_path": relative_path, # Cropped face path
+                        "face_mesh": face_landmarks,
+                        "full_body_pose": full_body_pose_data, # This is now passed through
+                        "segmentation_mask_path": segmentation_outputs_paths.get("segmentation_mask_path"),
+                        "segmented_person_path": segmentation_outputs_paths.get("segmented_person_path"),
+                        "isolated_background_path": segmentation_outputs_paths.get("isolated_background_path"),
+                        # Optionally pass the raw mask data if needed downstream, though it can be large.
+                        # "raw_human_segmentation_mask": human_segmentation_mask_data
+                    }
+                    unique_track_instances_data[unique_track_key].append(frame_data_for_track)
                     pbar.update(1)
         cap.release()
 
@@ -627,15 +641,9 @@ class FrameSelector:
         for unique_track_key, frames_for_track in unique_track_instances_data.items():
             scene_id, local_track_id = unique_track_key
             top_frames_for_this_track = sorted(frames_for_track, key=lambda x: x["total_score"], reverse=True)[:self.top_n]
-            
-            if not top_frames_for_this_track:
-                continue
-
-            if scene_id not in selected_frames_output:
-                selected_frames_output[scene_id] = []
-            
-            unique_track_id_str = f"{scene_id}_track_{local_track_id}" 
-
+            if not top_frames_for_this_track: continue
+            if scene_id not in selected_frames_output: selected_frames_output[scene_id] = []
+            unique_track_id_str = f"{scene_id}_track_{local_track_id}"
             selected_frames_output[scene_id].append({
                 "unique_track_id": unique_track_id_str, 
                 "top_frames": [
@@ -645,7 +653,10 @@ class FrameSelector:
                         "face_coord": f_data["face_coord"],
                         "image_path": f_data["image_path"],
                         "face_mesh": f_data["face_mesh"],
-                        "full_body_pose": f_data["full_body_pose"] # Include in output
+                        "full_body_pose": f_data["full_body_pose"],
+                        "segmentation_mask_path": f_data.get("segmentation_mask_path"),
+                        "segmented_person_path": f_data.get("segmented_person_path"),
+                        "isolated_background_path": f_data.get("isolated_background_path")
                     }
                     for f_data in top_frames_for_this_track
                 ]
@@ -653,8 +664,5 @@ class FrameSelector:
         return selected_frames_output
 
     def close(self):
-        if hasattr(self, 'pose_landmarker') and self.pose_landmarker:
-            self.pose_landmarker.close()
-            print("MediaPipe PoseLandmarker closed.")
-        # Placeholder for other cleanup if needed
-        print("FrameSelector closed.")
+        # Removed self.pose_landmarker.close()
+        print("FrameSelector closed (no internal pose landmarker to close).")

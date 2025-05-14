@@ -1,4 +1,4 @@
-"""Face detection (MTCNN) and detailed landmark extraction (MediaPipe) module."""
+"""Face detection (RetinaFace) and detailed landmark extraction (MediaPipe) module."""
 
 # Imports (Combined and Corrected)
 import os
