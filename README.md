@@ -14,32 +14,45 @@ Welcome to the ```facetracker``` repo! This is a Python package for doing incred
 
 **Caution:**: this package is still under development and may change rapidly over the next few weeks.
 
-## Features
-- A few
-- Cool
-- Things
-- These may include a wonderful CLI interface.
-
 ## Installation
-Install this package via :
 
-```sh
-pip install facetracker
-```
+1. Install the base requirements:
+   ```bash
+   pip install -r requirements-torch.txt
+   pip install -r requirements-torch-dev.txt
+   ```
 
-Or get the newest development version via:
+2. Install OpenMIM and use it to install mmcv and mmdet:
+   ```bash
+   pip install -U openmim
+   mim install mmcv
+   mim install mmdet
+   ```
 
-```sh
-pip install git+https://github.com/sensein/facetracker.git
-```
+3. Install mmpose from source:
+   ```bash
+   git clone https://github.com/open-mmlab/mmpose.git
+   cd mmpose
+   pip install -r requirements.txt
+   pip install -v -e .
+   ```
+   Note: The `-v` flag enables verbose output, and `-e` installs the project in editable mode so that local modifications take effect without reinstallation.
 
-## Quick start
-```Python
-from facetracker.app import hello_world
+4. Download the required config and checkpoint files:
+   ```bash
+   mim download mmpose --config td-hm_hrnet-w48_8xb32-210e_coco-256x192 --dest .
+   ```
 
-hello_world()
-```
+5. For more detailed installation instructions and customization options, refer to the [official MMPose installation guide](https://mmpose.readthedocs.io/en/latest/installation.html).
 
-## To do:
-- [ ] A
-- [ ] lot
+6. Install SAM2:
+   ```bash
+   git clone https://github.com/facebookresearch/sam2.git
+   cd sam2
+   pip install -e .
+   ```
+   For more details, refer to the [SAM2 GitHub repository](https://github.com/facebookresearch/sam2).
+
+7. For TensorFlow setup, refer to the `facetracker.def` file for a separate installation process to avoid conflicts with PyTorch. TensorFlow is used for face detection with RetinaFace, and we plan to integrate TensorFlow and PyTorch together later.
+
+

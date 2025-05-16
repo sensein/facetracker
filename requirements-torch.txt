@@ -1,0 +1,16 @@
+click==8.1.7
+filterpy==1.4.5
+numpy==1.26.4
+opencv-python>=4.10.0
+torch>=2.5.1
+torchvision>=0.20.1
+scikit-learn==1.5.1
+scipy==1.14.1
+pandas==2.2.2
+matplotlib==3.9.2
+pillow==10.2.0
+tqdm==4.66.5
+scenedetect==0.6.4
+PyYAML==6.0
+huggingface_hub==0.31.2
+wheel
