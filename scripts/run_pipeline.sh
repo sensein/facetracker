@@ -3,14 +3,14 @@
 #SBATCH --job-name=run_pipeline
 #SBATCH --output=../slurm_logs/run_pipeline_%A_%a.out
 #SBATCH --error=../slurm_logs/run_pipeline_%A_%a.err
-#SBATCH --partition=ou_bcs_low
+#SBATCH --partition=ou_bcs_normal
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4     # Adjust as needed
 #SBATCH --mem=4G             # Adjust as needed
 #SBATCH --gres=gpu:1          # Request 1 GPU
-#SBATCH --time=01:30:00       # Adjust as needed (e.g., 1 hour)
-#SBATCH --array=0-2         # Array of 292 jobs (0 to 291)
+#SBATCH --time=03:00:00       # Adjust as needed (e.g., 1 hour)
+#SBATCH --array=0-5         # Array of 292 jobs (0 to 291)
 
 # --- User Configuration ---
 # Path to the Apptainer SIF file

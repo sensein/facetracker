@@ -1,258 +1,250 @@
 import os
-import json
-import cv2 # For getting image dimensions
-import numpy as np # For NumpyEncoder if saving embeddings
-from tqdm import tqdm # For overall progress if desired, though sub-modules have it
-import matplotlib.pyplot as plt # Added for get_color
 import argparse
+import time
+import json
+from tqdm import tqdm
+import cv2
+import mediapipe as mp
 
-# Assuming your package structure allows these imports when run from project root
-# or that 'facetracker' is in PYTHONPATH.
-# If running as a script, you might need to adjust sys.path or run as a module.
-from facetracker.scene_detector import SceneDetector
 from facetracker.face_detector import FaceDetector
 from facetracker.face_tracker import FaceTracker, FrameSelector
 from facetracker.face_cluster import FaceEmbedder, FaceClusterer
+from facetracker.mmpose_estimator import MMPoseEstimator
+from facetracker.person_associator import PersonAssociator
+from facetracker.utils.drawing import draw_face_bbox_with_id, draw_cluster_id_on_video, draw_selected_frames_on_video
+from facetracker.utils.helpers import save_scene_clips, save_cluster_data_to_csv
 
-# Helper class for JSON serialization of NumPy arrays (like embeddings)
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, (np.integer, np.floating, np.bool_)):
-            return obj.item()
-        return super(NumpyEncoder, self).default(obj)
+def main(args):
+    print(f"Starting character tracking pipeline for video: {args.video_file}")
+    start_time = time.time()
 
-# --- Helper Function for Colors ---
-def get_color(idx):
-    """Gets a distinct color for a given ID."""
-    cmap = plt.get_cmap('tab10')  # Using tab10 colormap
-    return tuple(int(c * 255) for c in cmap(idx % 10)[:3]) # Get RGB, scale to 0-255
+    output_base_dir = args.output_dir if args.output_dir else os.path.join(os.path.dirname(args.video_file), "output_" + os.path.splitext(os.path.basename(args.video_file))[0])
+    os.makedirs(output_base_dir, exist_ok=True)
+    print(f"Output will be saved to: {output_base_dir}")
 
-def run_full_pipeline(video_path: str, output_base_dir: str,
-                      face_landmarker_model_path: str,
-                      pose_landmarker_model_path: str):
-    """
-    Runs the full face tracking and clustering pipeline.
-    """
-    # Get video name without extension for the subfolder
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
-    output_dir = os.path.join(output_base_dir, video_name)
-    
-    print(f"Starting pipeline for video: {video_path}")
-    print(f"Output will be saved in: {output_dir}")
-
-    # --- 0. Setup Output Directories ---
-    os.makedirs(output_dir, exist_ok=True)
-    scene_output_file = os.path.join(output_dir, "scene_cuts.csv")
-    # FaceDetector's raw output can be very large, usually not saved unless debugging
-    # face_detection_output_file = os.path.join(output_dir, "all_face_detections.json")
-    frame_selector_crops_dir = os.path.join(output_dir, "selected_face_crops")
-    os.makedirs(frame_selector_crops_dir, exist_ok=True)
-    final_clustering_output_file = os.path.join(output_dir, "final_face_clusters.json")
-    tracking_video_path = os.path.join(output_dir, f"{video_name}_tracked.mp4")
-    
-    # Optional: For saving intermediate results for debugging
-    # intermediate_frame_selector_output_file = os.path.join(output_dir, "dbg_frame_selector_output.json")
-    # intermediate_embedder_output_file = os.path.join(output_dir, "dbg_embedder_output.json")
-
-
-    # --- 1. Scene Detection ---
-    print("\nStep 1: Detecting scenes...")
-    scene_detector = SceneDetector(video_path=video_path, min_scene_len=15) # min_scene_len is an example
-    scene_detector.initialize_scene_manager()
-    scene_detector.detect_scenes()
-    scenes = scene_detector.shots # Retrieve the shots stored by detect_scenes
-
-    if not scenes: # Handle case with no scenes detected, treat video as one scene
-        print("No distinct scenes detected. Treating video as a single scene.")
-        cap_temp = cv2.VideoCapture(video_path)
-        total_frames = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap_temp.get(cv2.CAP_PROP_FPS) if cap_temp.get(cv2.CAP_PROP_FPS) > 0 else 30.0
-        cap_temp.release()
-        if total_frames > 0:
-            scenes = [(0, total_frames - 1, 0.0, (total_frames - 1) / fps)]
-        else:
-            print(f"Error: Video at {video_path} has no frames or could not be read.")
-            return
-    scene_detector.save_shots(scene_output_file)
-    print(f"Detected {len(scenes)} scenes. Boundaries saved to {scene_output_file}")
-
-    # --- 2. Face Detection (and Face Landmarks for entire video) ---
-    print("\nStep 2: Detecting faces and face landmarks (this runs once)...")
-    face_detector = FaceDetector(
-        video_path=video_path,
-        output_dir=output_dir, 
-        face_landmarker_model_path=face_landmarker_model_path,
-        # device='cuda' # Or 'cpu'. Default handles availability check.
-        # Can add other MTCNN params here if needed, e.g.:
-        face_min_confidence=0.95, # Adjust as needed
+    # --- Step 1: Face Detection ---
+    print("\nStep 1: Detecting faces...")
+    face_detector_instance = FaceDetector(
+        model_path=args.face_detection_model_path,
+        device=args.device,
+        output_dir=os.path.join(output_base_dir, "face_detection_output"),
+        save_annotated_frames=args.save_annotated_detection_frames,
+        detection_threshold=args.face_detection_threshold,
+        target_face_size_ratio=args.target_face_size_ratio,
+        skip_frames=args.detection_skip_frames
     )
-    all_faces_data_by_frame_str = face_detector.detect_faces_in_video()
-    # face_detector.save_results(face_detection_output_file, all_faces_data_by_frame_str) # Usually too large
-    print("Face detection and landmark extraction complete for all frames.")
-
-    # --- 3. Face Tracking (per scene) ---
-    print("\nStep 3: Tracking faces within each scene...")
-    tracked_data_by_scene = {} # Key: scene_id_str, Value: List[tracked_face_dict]
-
-    cap_dims = cv2.VideoCapture(video_path)
-    img_width = int(cap_dims.get(cv2.CAP_PROP_FRAME_WIDTH))
-    img_height = int(cap_dims.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap_dims.release()
-    if img_width == 0 or img_height == 0:
-        print(f"Error: Could not get video dimensions from {video_path}.")
-        if hasattr(face_detector, 'landmarker') and face_detector.landmarker: face_detector.landmarker.close()
-        return
-    img_size = (img_height, img_width)
-
-    for i, scene_info in enumerate(scenes):
-        scene_id_str = f"scene_{i}"
-        start_frame, end_frame, _, _ = scene_info
-        print(f"  Processing {scene_id_str}: frames {start_frame} to {end_frame}")
-
-        face_tracker_instance = FaceTracker(max_age=30, min_hits=3, iou_threshold=0.3)
-
-        current_scene_tracked_data = []
-        for frame_idx in tqdm(range(start_frame, end_frame + 1), desc=f"  Tracking {scene_id_str}", unit="frame", leave=False):
-            frame_key = f"frame_{frame_idx}"
-            detections_for_this_frame = all_faces_data_by_frame_str.get(frame_key, [])
-
-            tracked_instances_in_frame = face_tracker_instance.track_faces(
-                frame=frame_idx,
-                face_data=detections_for_this_frame,
-                img_size=img_size
-            )
-            current_scene_tracked_data.extend(tracked_instances_in_frame)
-        
-        tracked_data_by_scene[scene_id_str] = current_scene_tracked_data
-        print(f"  Finished tracking for {scene_id_str}. Found {len(current_scene_tracked_data)} total tracked face instances in this scene.")
+    all_faces_data_by_frame_str = face_detector_instance.detect_faces_in_video(args.video_file)
     
-    if hasattr(face_detector, 'landmarker') and face_detector.landmarker:
-        face_detector.landmarker.close() # Explicitly close FaceLandmarker
-    del face_detector # Release resources
-
-    # After tracking is complete, create visualization video
-    print("\nCreating tracking visualization video...")
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error opening video file for visualization: {video_path}")
+    detection_output_path = os.path.join(output_base_dir, "all_faces_detected_data.json")
+    with open(detection_output_path, 'w') as f:
+        json.dump(all_faces_data_by_frame_str, f, indent=4)
+    print(f"Face detection complete. Detected faces in {len(all_faces_data_by_frame_str)} frames.")
+    print(f"Raw detection data saved to: {detection_output_path}")
+    
+    if not any(all_faces_data_by_frame_str.values()):
+        print("No faces detected in the video. Exiting pipeline.")
         return
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    out_video = cv2.VideoWriter(tracking_video_path, fourcc, fps, (width, height))
+    # --- Step 1.5: Pose Estimation and Face-Pose Association ---
+    print("\nStep 1.5: Estimating Poses and Associating with Faces...")
+    mmpose_estimator = MMPoseEstimator(
+        model_type=args.mmpose_model_type,
+        model_config_path=args.mmpose_config_path,
+        checkpoint_path=args.mmpose_checkpoint_path,
+        device=args.device
+    )
+    
+    person_associator_instance = PersonAssociator(
+        pose_estimator=mmpose_estimator,
+        face_to_pose_iou_threshold=args.face_to_pose_iou_threshold,
+        temporal_window=args.pose_temporal_window,
+        min_pose_confidence=args.min_pose_confidence
+    )
+    
+    all_augmented_data_by_frame_str = person_associator_instance.process_and_associate(
+        all_faces_data_by_frame_str, 
+        args.video_file
+    )
+    
+    mmpose_estimator.close()
+    print("Pose estimation and association complete.")
+    
+    augmented_data_output_path = os.path.join(output_base_dir, "all_augmented_detection_data.json")
+    with open(augmented_data_output_path, 'w') as f:
+        json.dump(all_augmented_data_by_frame_str, f, indent=4)
+    print(f"Augmented detection data (with pose info) saved to: {augmented_data_output_path}")
 
-    frame_idx = 0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    pbar = tqdm(total=total_frames, desc="Creating visualization video")
+    # --- Get Video Dimensions for FaceTracker ---
+    cap_temp_for_dims = cv2.VideoCapture(args.video_file)
+    video_width = 0
+    video_height = 0
+    if cap_temp_for_dims.isOpened():
+        video_width = int(cap_temp_for_dims.get(cv2.CAP_PROP_FRAME_WIDTH))
+        video_height = int(cap_temp_for_dims.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap_temp_for_dims.release()
+    else:
+        print(f"Error: Could not open video {args.video_file} to get dimensions for FaceTracker. Exiting.")
+        return
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    if video_width == 0 or video_height == 0:
+        print(f"Error: Video dimensions ({video_width}x{video_height}) are invalid. Exiting.")
+        return
 
-        # Find which scene this frame belongs to
-        current_scene = None
-        for scene_id, scene_data in tracked_data_by_scene.items():
-            # Get frame detections for this scene
-            frame_detections = [d for d in scene_data if d['frame'] == frame_idx]
-            if frame_detections:
-                current_scene = scene_id
-                break
+    # --- Step 2: Face Tracking with Pose Information ---
+    print("\nStep 2: Tracking faces across frames...")
+    face_tracker_instance = FaceTracker(
+        iou_threshold=args.tracking_iou_threshold, 
+        max_lost_tracks=args.max_lost_tracks,
+        min_track_length=args.min_track_length,
+        use_pose_info=True  # Enable pose information for tracking
+    )
+    
+    tracked_data_by_scene = face_tracker_instance.track_faces(
+        all_augmented_data_by_frame_str,
+        video_width,
+        video_height
+    )
+    
+    tracking_output_path = os.path.join(output_base_dir, "tracked_faces_by_scene.json")
+    with open(tracking_output_path, 'w') as f:
+        json.dump(tracked_data_by_scene, f, indent=4)
+    print(f"Face tracking complete. Found {len(tracked_data_by_scene)} scenes/tracks.")
+    print(f"Tracking data saved to: {tracking_output_path}")
 
-        if current_scene:
-            # Draw bounding boxes and IDs for this frame
-            for track in tracked_data_by_scene[current_scene]:
-                if track['frame'] == frame_idx:
-                    bbox = track['bbox']
-                    track_id = track['id']
-                    landmarks = track.get('landmarks')
+    if not tracked_data_by_scene:
+        print("No stable tracks found after face tracking. Exiting further processing.")
+        return
 
-                    x1, y1, x2, y2 = map(int, bbox)
-                    color = get_color(track_id)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, f"ID: {track_id}", (x1, y1 - 10), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-                    if landmarks:
-                        for landmark in landmarks:
-                            lm_x = int(landmark[0] * width)
-                            lm_y = int(landmark[1] * height)
-                            cv2.circle(frame, (lm_x, lm_y), 1, (0, 255, 0), -1)
-
-        out_video.write(frame)
-        frame_idx += 1
-        pbar.update(1)
-
-    cap.release()
-    out_video.release()
-    pbar.close()
+    tracking_video_path = os.path.join(output_base_dir, "tracking_visualization.mp4")
+    draw_face_bbox_with_id(
+        args.video_file, 
+        tracked_data_by_scene, 
+        tracking_video_path, 
+        draw_pose=True,  # Always draw pose for better visualization
+        show_pose_track_id=True  # Show pose track IDs
+    )
     print(f"Tracking visualization video saved to: {tracking_video_path}")
 
-    # --- 4. Frame Selection (and Pose Estimation) ---
-    print("\nStep 4: Selecting top frames per track and performing pose estimation...")
+    # --- Step 3: Face Embedding and Clustering ---
+    print("\nStep 3: Generating face embeddings and clustering...")
+    face_embedder = FaceEmbedder(
+        model_name=args.embedding_model_name, 
+        device=args.device,
+        batch_size=args.embedding_batch_size
+    )
+    
+    tracked_data_with_embeddings_by_scene = face_embedder.embed_faces_in_tracks(
+        args.video_file, 
+        tracked_data_by_scene,
+        os.path.join(output_base_dir, "face_embeddings_cache")
+    )
+    
+    embeddings_output_path = os.path.join(output_base_dir, "tracked_faces_with_embeddings.json")
+    with open(embeddings_output_path, 'w') as f:
+        json.dump(tracked_data_with_embeddings_by_scene, f, indent=4)
+    print(f"Face embeddings generated. Saved to: {embeddings_output_path}")
+
+    face_clusterer = FaceClusterer(
+        metric=args.clustering_metric, 
+        threshold=args.clustering_threshold,
+        min_cluster_size=args.min_cluster_size
+    )
+    
+    clustered_data_by_scene = face_clusterer.cluster_embeddings(tracked_data_with_embeddings_by_scene)
+    
+    clustering_output_path = os.path.join(output_base_dir, "clustered_face_data.json")
+    with open(clustering_output_path, 'w') as f:
+        json.dump(clustered_data_by_scene, f, indent=4)
+    print(f"Face clustering complete. Saved to: {clustering_output_path}")
+
+    # --- Step 4: Frame Selection ---
+    print("\nStep 4: Selecting best frames per cluster...")
     frame_selector = FrameSelector(
-        video_file=video_path,
-        output_dir=frame_selector_crops_dir,
-        save_images=True, # Set to False if you don't need face crops saved
-        pose_model_asset_path=pose_landmarker_model_path,
-        top_n=5, # Example: select top 5 frames per track
-        face_to_pose_iou_threshold=0.3 # Example
+        video_file=args.video_file,
+        top_n=args.frame_selection_top_n,
+        output_dir=os.path.join(output_base_dir, "selected_frames_per_cluster"),
+        save_images=args.save_selected_frames
     )
-    selected_frames_output = frame_selector.select_top_frames_per_face(tracked_data_by_scene)
-    frame_selector.close() # Close PoseLandmarker
-    # with open(intermediate_frame_selector_output_file, 'w') as f: json.dump(selected_frames_output, f, indent=4, cls=NumpyEncoder)
-    print("Frame selection and pose estimation complete.")
+    
+    selected_frames_data = frame_selector.select_best_frames_per_cluster(clustered_data_by_scene)
 
-    # --- 5. Face Embedding ---
-    print("\nStep 5: Generating face embeddings...")
-    face_embedder = FaceEmbedder() # Uses default InceptionResnetV1
-    all_tracks_with_embeddings = face_embedder.get_face_embeddings(
-        selected_frames_by_scene=selected_frames_output,
-        image_dir=frame_selector_crops_dir
+    selected_frames_output_path = os.path.join(output_base_dir, "selected_frames_data.json")
+    with open(selected_frames_output_path, 'w') as f:
+        json.dump(selected_frames_data, f, indent=4)
+    print(f"Frame selection complete. Data saved to: {selected_frames_output_path}")
+    if args.save_selected_frames:
+        print(f"Selected frames (images) saved to: {frame_selector.output_dir}")
+
+    # --- Step 5: Final Output Generation ---
+    print("\nStep 5: Generating final outputs...")
+    if args.save_scene_clips:
+        save_scene_clips(args.video_file, clustered_data_by_scene, os.path.join(output_base_dir, "scene_clips"))
+        print(f"Scene clips saved to: {os.path.join(output_base_dir, 'scene_clips')}")
+
+    csv_output_path = os.path.join(output_base_dir, "face_clusters_summary.csv")
+    save_cluster_data_to_csv(clustered_data_by_scene, csv_output_path)
+    print(f"Cluster summary CSV saved to: {csv_output_path}")
+    
+    final_video_path = os.path.join(output_base_dir, "final_clustered_output.mp4")
+    draw_cluster_id_on_video(
+        args.video_file, 
+        clustered_data_by_scene, 
+        final_video_path, 
+        draw_pose=True,
+        show_pose_track_id=True
     )
-    # with open(intermediate_embedder_output_file, 'w') as f: json.dump(all_tracks_with_embeddings, f, indent=4, cls=NumpyEncoder)
-    print("Face embedding generation complete.")
-    if not all_tracks_with_embeddings:
-        print("No embeddings were generated. Skipping clustering. Check previous steps for errors or empty selections.")
-        return
+    print(f"Final video with cluster IDs saved to: {final_video_path}")
 
-    # --- 6. Face Clustering ---
-    print("\nStep 6: Clustering faces...")
-    face_clusterer = FaceClusterer(similarity_threshold=0.7, max_iterations=50) # Example params
-    final_clusters = face_clusterer.cluster_faces(all_tracks_with_embeddings)
+    if args.draw_selected_frames_on_final_video and args.save_selected_frames:
+        final_video_with_selection_markers_path = os.path.join(output_base_dir, "final_video_with_selection_markers.mp4")
+        draw_selected_frames_on_video(final_video_path, selected_frames_data, final_video_with_selection_markers_path)
+        print(f"Final video with selected frame markers saved to: {final_video_with_selection_markers_path}")
+
+    total_time = time.time() - start_time
+    print(f"\nPipeline finished in {total_time:.2f} seconds.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Full Character Tracking, Clustering, and Frame Selection Pipeline.")
+    parser.add_argument("--video_file", type=str, required=True, help="Path to the input video file.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Directory to save all outputs. Defaults to 'output_[video_name]' in the video's directory.")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use for models ('cuda' or 'cpu').")
+
+    # Face Detection (Step 1)
+    parser.add_argument("--face_detection_model_path", type=str, default=None, help="Path to a custom face detection model. If None, uses a default.")
+    parser.add_argument("--save_annotated_detection_frames", action="store_true", help="Save frames with detected face bounding boxes.")
+    parser.add_argument("--face_detection_threshold", type=float, default=0.8, help="Confidence threshold for face detection.")
+    parser.add_argument("--target_face_size_ratio", type=float, default=0.05, help="Target minimum face size as a ratio of the frame's smaller dimension (0-1).")
+    parser.add_argument("--detection_skip_frames", type=int, default=0, help="Number of frames to skip between detections (0 for no skip).")
+
+    # Pose Estimation & Association (Step 1.5)
+    parser.add_argument("--mmpose_model_type", type=str, default="hiera_l", help="Type of MMPose model to use.")
+    parser.add_argument("--mmpose_config_path", type=str, required=True, help="Path to the MMPose model configuration file.")
+    parser.add_argument("--mmpose_checkpoint_path", type=str, required=True, help="Path to the MMPose model checkpoint file.")
+    parser.add_argument("--face_to_pose_iou_threshold", type=float, default=0.3, help="IoU threshold for associating a face with a pose-derived head bounding box.")
+    parser.add_argument("--pose_temporal_window", type=int, default=5, help="Number of frames to look back for temporal consistency in pose tracking.")
+    parser.add_argument("--min_pose_confidence", type=float, default=0.3, help="Minimum confidence threshold for pose keypoints.")
     
-    print(f"Face clustering complete. Found {len(final_clusters)} unique face clusters.")
+    # Face Tracking (Step 2)
+    parser.add_argument("--tracking_iou_threshold", type=float, default=0.4, help="IoU threshold for matching detections to existing tracks.")
+    parser.add_argument("--max_lost_tracks", type=int, default=10, help="Maximum number of consecutive frames a track can be lost.")
+    parser.add_argument("--min_track_length", type=int, default=5, help="Minimum number of frames a track must exist to be considered valid.")
 
-    # --- 7. Save Final Output ---
-    print(f"\nSaving final clustering results to {final_clustering_output_file}...")
-    with open(final_clustering_output_file, 'w') as f:
-        json.dump(final_clusters, f, indent=4, cls=NumpyEncoder)
+    # Face Embedding (Step 3)
+    parser.add_argument("--embedding_model_name", type=str, default="facenet", help="Name of the face embedding model.")
+    parser.add_argument("--embedding_batch_size", type=int, default=32, help="Batch size for face embedding generation.")
     
-    print(f"Pipeline finished successfully! Final output: {final_clustering_output_file}")
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Run the full face tracking and clustering pipeline.")
-    parser.add_argument("--video_path", type=str, required=True,
-                      help="Path to the input video file.")
-    parser.add_argument("--output_base_dir", type=str, required=True,
-                      help="Base directory for all output files.")
-    parser.add_argument("--face_landmarker_model_path", type=str, required=True,
-                      help="Path to the MediaPipe face landmarker model.")
-    parser.add_argument("--pose_landmarker_model_path", type=str, required=True,
-                      help="Path to the MediaPipe pose landmarker model.")
+    # Clustering (Step 3)
+    parser.add_argument("--clustering_metric", type=str, default="cosine", help="Distance metric for clustering.")
+    parser.add_argument("--clustering_threshold", type=float, default=0.6, help="Distance threshold for clustering.")
+    parser.add_argument("--min_cluster_size", type=int, default=3, help="Minimum number of faces required to form a cluster.")
+    
+    # Frame Selection (Step 4)
+    parser.add_argument("--frame_selection_top_n", type=int, default=5, help="Number of best frames to select per cluster.")
+    parser.add_argument("--save_selected_frames", action="store_true", help="Save selected frames as images.")
+    
+    # Output Generation (Step 5)
+    parser.add_argument("--save_scene_clips", action="store_true", help="Save video clips for each scene.")
+    parser.add_argument("--draw_selected_frames_on_final_video", action="store_true", help="Draw markers for selected frames on the final video.")
 
     args = parser.parse_args()
-
-    # Create output directory if it doesn't exist
-    os.makedirs(args.output_base_dir, exist_ok=True)
-
-    run_full_pipeline(
-        video_path=args.video_path,
-        output_base_dir=args.output_base_dir,
-        face_landmarker_model_path=args.face_landmarker_model_path,
-        pose_landmarker_model_path=args.pose_landmarker_model_path
-    )
+    main(args)

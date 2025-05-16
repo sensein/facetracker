@@ -359,9 +359,9 @@ class FaceTracker:
             
             if not detections_for_sort_np: # No valid detections for sort in this frame
                 detections_np = np.empty((0, 5))
-            else:
+        else:
                 detections_np = np.array(detections_for_sort_np)
-
+            
             # Update SORT tracker
             # Sort.update returns: [[x1, y1, x2, y2, track_id, confidence], ...]
             tracked_bboxes_array = self.sort_tracker.update(
@@ -371,7 +371,7 @@ class FaceTracker:
             )
             
             if tracked_bboxes_array.shape[0] > 0:
-                # Create a mapping from sort_tracker's internal trk.id to its latest_associated_data
+            # Create a mapping from sort_tracker's internal trk.id to its latest_associated_data
                 # This latest_associated_data is the complete aug_face_dict we passed in.
                 tracker_id_to_full_data_map = {
                     trk.id: trk.latest_associated_data 
@@ -410,7 +410,7 @@ class FaceTracker:
                             # print(f"Debug: Still no data for track {track_id} in frame {current_frame_idx}")
                             # Fallback: create a very basic entry
                             tracked_instance = {
-                                "id": track_id,
+                    "id": track_id,
                                 "frame": current_frame_idx,
                                 "bbox": track_info_array[:4].tolist(),
                                 "confidence": track_info_array[5],
@@ -484,7 +484,7 @@ class FrameSelector:
         return None
 
     def save_segmentation_outputs(
-        self,
+        self, 
         full_frame_bgr: np.ndarray,
         segmentation_mask_float: np.ndarray,
         scene_id: str,
@@ -504,7 +504,7 @@ class FrameSelector:
         try:
             # 1. Threshold the float mask to get a binary mask (0 or 1)
             binary_mask_01 = (segmentation_mask_float > mask_threshold).astype(np.uint8)
-
+        
             if binary_mask_01.ndim != 2:
                 print(f"Warning: Segmentation mask for S:{scene_id}, T:{track_id}, F:{frame_idx} is not 2D. Skipping save.")
                 return output_paths
@@ -556,7 +556,7 @@ class FrameSelector:
                 for face_entry in scene_face_entries:
                     local_track_id = face_entry["id"]
                     frame_idx = face_entry["frame"]
-                    face_coords = face_entry["bbox"]
+                    face_coords = face_entry["bbox"] 
                     confidence = face_entry["confidence"]
                     face_landmarks = face_entry.get("landmarks")
                     
@@ -615,7 +615,7 @@ class FrameSelector:
                         segmentation_outputs_paths = self.save_segmentation_outputs(
                             frame, human_segmentation_mask_data, scene_id, local_track_id, frame_idx
                         )
-                        
+
                     unique_track_key = (scene_id, local_track_id)
                     if unique_track_key not in unique_track_instances_data:
                         unique_track_instances_data[unique_track_key] = []
@@ -625,7 +625,7 @@ class FrameSelector:
                         "total_score": score,
                         "face_coord": face_coords,
                         "image_path": relative_path, # Cropped face path
-                        "face_mesh": face_landmarks,
+                        "face_mesh": face_landmarks, 
                         "full_body_pose": full_body_pose_data, # This is now passed through
                         "segmentation_mask_path": segmentation_outputs_paths.get("segmentation_mask_path"),
                         "segmented_person_path": segmentation_outputs_paths.get("segmented_person_path"),
@@ -643,7 +643,7 @@ class FrameSelector:
             top_frames_for_this_track = sorted(frames_for_track, key=lambda x: x["total_score"], reverse=True)[:self.top_n]
             if not top_frames_for_this_track: continue
             if scene_id not in selected_frames_output: selected_frames_output[scene_id] = []
-            unique_track_id_str = f"{scene_id}_track_{local_track_id}"
+            unique_track_id_str = f"{scene_id}_track_{local_track_id}" 
             selected_frames_output[scene_id].append({
                 "unique_track_id": unique_track_id_str, 
                 "top_frames": [

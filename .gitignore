@@ -3,7 +3,7 @@ slurm_logs/
 *.lock
 # Ruff
 .ruff_cache
-
+*.mp4
 # Mac
 .DS_Store
 
