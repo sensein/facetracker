@@ -359,7 +359,7 @@ class FaceTracker:
             
             if not detections_for_sort_np: # No valid detections for sort in this frame
                 detections_np = np.empty((0, 5))
-        else:
+            else: # This 'else' corresponds to 'if augmented_faces_in_frame_list:' or rather 'if not detections_for_sort_np'
                 detections_np = np.array(detections_for_sort_np)
             
             # Update SORT tracker

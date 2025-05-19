@@ -1,52 +1,112 @@
-import torch
+"""MMPose-based pose estimation module."""
+import cv2
 import numpy as np
-from mmpose.apis import PoseEstimator as MMPoseModel # Using the high-level API
-# from mmpose.structures import PoseDataSample # For understanding output, if needed
+# from mmpose.apis import PoseEstimator as MMPoseModel # Old import
+from mmpose.apis import MMPoseInferencer # New import for MMPose v1.x
+from typing import List, Dict, Any, Tuple, Optional
 
 class MMPoseEstimator:
-    def __init__(self, model_config_path: str, model_checkpoint_path: str, keypoint_convention: str = 'coco', device: str = 'cuda:0'):
+    """
+    Estimates human pose using a specified MMPose model via MMPoseInferencer.
+    Handles initialization of the model and processes images/frames for pose keypoints.
+    """
+    def __init__(
+        self,
+        pose_model_config: str,
+        pose_model_checkpoint: str,
+        device: str = 'cuda:0',
+        keypoint_convention: str = 'coco' # e.g., 'coco', 'animalpose', etc.
+    ):
         """
-        Initializes the MMPoseEstimator.
+        Initializes the MMPoseEstimator with a specific model configuration and checkpoint.
 
         Args:
-            model_config_path (str): Path to the MMPose model config file (e.g., 'hrnet_w48_coco_256x192.py').
-            model_checkpoint_path (str): Path to the MMPose model checkpoint file or URL.
-            keypoint_convention (str): The keypoint convention used by the model (e.g., 'coco', 'mpii').
+            pose_model_config (str): Path to the MMPose model's config file.
+            pose_model_checkpoint (str): Path to the MMPose model's checkpoint file.
             device (str): Device to run the model on (e.g., 'cuda:0' or 'cpu').
+            keypoint_convention (str): The convention of the keypoints (e.g., 'coco').
+                                       This helps in interpreting the output keypoints.
         """
-        self.device = device
-        self.estimator = MMPoseModel(
-            model=model_config_path,
-            weights=model_checkpoint_path,
-            device=self.device
+        print(f"Initializing MMPoseInferencer with config: {pose_model_config} and checkpoint: {pose_model_checkpoint} on device: {device}")
+        
+        self.inferencer = MMPoseInferencer(
+            pose2d=pose_model_config, 
+            pose2d_weights=pose_model_checkpoint,
+            device=device  # Use the main device for the inferencer
         )
-        # You might need to know the keypoint convention (e.g., 'coco', 'mpii')
-        # for get_pose_head_bbox. This often comes from the dataset used for training.
+            
         self.keypoint_convention = keypoint_convention
+        self.device = device
+        # Input_size can often be inferred or is handled by the model's config, 
+        # but if specific preprocessing is needed, it might be relevant.
+        # For now, we rely on MMPoseInferencer's internal handling.
+        print(f"MMPoseInferencer initialized for {keypoint_convention} convention.")
 
-    def estimate_poses(self, image_or_path, person_bboxes: list | None = None):
+    def estimate_poses(
+        self, 
+        frame: np.ndarray,
+        bboxes: Optional[List[List[float]]] = None # Bounding boxes [x1, y1, x2, y2] for specific RoIs
+    ) -> List[Dict[str, Any]]:
         """
-        Performs pose estimation on a single image.
+        Estimates poses in the given frame.
+        If bboxes are provided, estimates pose for each bounding box.
+        Otherwise, performs person detection first (if model supports it) or whole-image pose estimation.
 
         Args:
-            image_or_path (str | np.ndarray): Path to the image or the image as a NumPy array.
-            person_bboxes (list, optional): A list of person bounding boxes [x1, y1, x2, y2]
-                                            for top-down inference. If None, assumes the model
-                                            is bottom-up or end-to-end.
+            frame (np.ndarray): The input image/frame (BGR format from OpenCV).
+            bboxes (Optional[List[List[float]]]): A list of bounding boxes [[x1, y1, x2, y2], ...]. 
+                                                 If None, MMPoseInferencer may perform its own detection 
+                                                 or process the whole image based on its configuration.
 
         Returns:
-            list: A list of PoseDataSample objects, each containing keypoints, scores, and bboxes
-                  for a detected person. Returns an empty list if no poses are detected.
+            List[Dict[str, Any]]: A list of dictionaries, where each dictionary contains:
+                'keypoints': an array of keypoints (x, y) for a detected person.
+                'keypoint_scores': an array of confidence scores for each keypoint.
+                'bbox': an array [x1, y1, x2, y2, score] for the person, if provided/detected.
+                      Note: MMPoseInferencer might return bboxes slightly differently or not at all
+                      if input bboxes are already provided. We'll try to standardize.
         """
-        # The MMPose PoseEstimator can take a list of bboxes.
-        # If person_bboxes are [N, 4], it expects them in that format.
-        # If they are [N, 5] (with score), it should also work.
-        # Ensure bboxes are in the correct format if provided.
-        results_generator = self.estimator(image_or_path, bboxes=person_bboxes)
+        # MMPoseInferencer expects BGR images by default if using OpenCV backend for loading, 
+        # or RGB if using other backends. Since we pass a numpy array, it's good practice
+        # to ensure it's in the format the model expects (often RGB).
+        # However, many MMPose models handle BGR from OpenCV directly.
+        # For now, let's assume BGR is fine as it's common with cv2.imread.
+        # If issues arise, convert: frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # MMPoseInferencer call: input can be image path, URL, or numpy array.
+        # It returns a generator, so we convert it to a list.
+        # `bboxes` argument for the inferencer itself might be named differently or handled
+        # as part of the input dict. Let's check its API.
+        # According to MMPoseInferencer docs, if bboxes are provided, they should be passed as a list of lists/arrays.
         
-        # The estimator returns a generator. Consume it to get a list of PoseDataSample.
-        pose_results = [result for result in results_generator]
-        return pose_results
+        results_generator = self.inferencer(frame, bboxes=bboxes, return_vis=False, show=False)
+        results = list(results_generator)
+
+        processed_poses = []
+        if results and 'predictions' in results[0]:
+            for instance_predictions in results[0]['predictions']:
+                # Each `instance_predictions` is typically a list for each detected/provided person/instance
+                for pred in instance_predictions: # If multiple instances were processed from bboxes
+                    keypoints = pred.get('keypoints', [])
+                    keypoint_scores = pred.get('keypoint_scores', [])
+                    # Inferencer might provide 'bbox' directly. If we passed bboxes in,
+                    # we might want to associate results back to those original bboxes.
+                    # The 'bbox' from pred is usually [x1, y1, x2, y2, score].
+                    bbox_pred = pred.get('bbox', [0,0,0,0,0]) 
+                    if len(bbox_pred) == 4: # if score is not included
+                        bbox_pred.append(1.0) # Assume score 1.0 if not present
+
+                    processed_poses.append({
+                        'keypoints': np.array(keypoints, dtype=np.float32),
+                        'keypoint_scores': np.array(keypoint_scores, dtype=np.float32),
+                        'bbox': np.array(bbox_pred, dtype=np.float32) # [x1, y1, x2, y2, score]
+                    })
+        
+        return processed_poses
+
+    def get_keypoint_convention(self) -> str:
+        """Returns the keypoint convention used by the model."""
+        return self.keypoint_convention
 
     @staticmethod
     def get_pose_head_bbox(keypoints: np.ndarray, keypoint_scores: np.ndarray, image_shape: tuple, 
@@ -123,3 +183,42 @@ class MMPoseEstimator:
         # as it manages its own model lifecycle.
         # If we were using init_model directly, we might have things to clean.
         print("MMPoseEstimator closed (typically no specific action needed for mmpose.apis.PoseEstimator).") 
+
+# Example usage (for testing purposes, if run directly)
+if __name__ == '__main__':
+    # This example assumes you have a COCO model config and checkpoint.
+    # You'll need to download them or use paths to your local models.
+    # Example paths (replace with actual paths):
+    # MODEL_CONFIG = 'mmpose_models/td-hm_hrnet-w32_8xb64-210e_coco-256x192.py'
+    # MODEL_CHECKPOINT = 'https://download.openmmlab.com/mmpose/top_down/hrnet/hrnet_w32_coco_256x192-c78dce93_20200708.pth'
+    
+    # For a quick test, you might need to provide actual model files.
+    # Let's assume the user has a model like 'rtmpose-m_8xb256-420e_coco-256x192.py'
+    # and its corresponding .pth file in a 'mmpose_models' directory.
+    
+    # A more robust example would require actual model files.
+    # For now, we'll just print a message if this is run directly.
+    print("MMPoseEstimator class definition. To test, instantiate with model paths and call estimate_poses.")
+    print("Example: estimator = MMPoseEstimator(pose_model_config='path/to/config.py', pose_model_checkpoint='path/to/checkpoint.pth')")
+
+    # Dummy test (requires model files to actually run)
+    # try:
+    #     # Ensure you have these files or use valid downloadable URLs for MMPoseInferencer
+    #     estimator = MMPoseEstimator(
+    #         pose_model_config='td-hm_hrnet-w32_8xb64-210e_coco-256x192.py', # Placeholder, needs actual file or alias
+    #         pose_model_checkpoint='hrnet_w32_coco_256x192-c78dce93_20200708.pth', # Placeholder
+    #         device='cpu'
+    #     )
+    #     # Create a dummy image
+    #     dummy_frame = np.zeros((640, 480, 3), dtype=np.uint8)
+    #     cv2.rectangle(dummy_frame, (100, 100), (200, 300), (0, 255, 0), 2) # Draw a dummy person bbox
+    #     dummy_bboxes = [[100, 100, 200, 300]]
+
+    #     poses = estimator.estimate_poses(dummy_frame, bboxes=dummy_bboxes)
+    #     if poses:
+    #         print(f"Estimated {len(poses)} poses.")
+    #         print(f"First pose keypoints: {poses[0]['keypoints']}")
+    #     else:
+    #         print("No poses estimated.")
+    # except Exception as e:
+    #     print(f"Could not run example: {e}. Ensure model config/checkpoint paths are correct and MMPose is installed.") 

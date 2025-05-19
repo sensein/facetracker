@@ -1,29 +1,56 @@
 Bootstrap: docker
-From: nvcr.io/nvidia/tensorflow:25.02-tf2-py3
+From: nvcr.io/nvidia/tensorflow:24.10-tf2-py3
 
 %help
     Facetracker application container.
-    and installs additional dependencies for the facetracker project using pip from requirements.txt.
+    Installs dependencies from requirements-all.txt, OpenMMLab (mmcv, mmdet, mmpose).
+    Base image uses Python 3.10, TensorFlow 2.16.1, CUDA 12.6.2, cuDNN 9.5.0.
 
 %files
-    # Copy your entire project (including the new requirements.txt)
-    /home/yibei/facetracker /opt/facetracker 
+    # Copy only requirements-all.txt into the image
+    /home/yibei/facetracker/requirements-all.txt /opt/requirements-all.txt
 
 %post
-    echo "Installing system dependencies for OpenCV..."
-    apt-get update && apt-get install -y libx11-6 libxext6
+    echo "Updating package lists and installing system dependencies..."
+    apt-get update && apt-get install -y --no-install-recommends \
+        libx11-6 \
+        libxext6 \
+        git \
+        && rm -rf /var/lib/apt/lists/*
 
-    echo "Starting build: Updating pip and installing dependencies from requirements.txt..."
+    echo "Updating pip..."
     python3 -m pip install --upgrade pip
     
-    echo "Installing facetracker application-specific dependencies..."
-    cd /opt/facetracker
-    python3 -m pip install --no-cache-dir -r requirements.txt # Use --no-cache-dir for cleaner install
+    echo "Setting working directory to /opt and installing application-specific dependencies..."
+    cd /opt
+    # Ensure requirements-all.txt is present from the %files copy
+    if [ -f "requirements-all.txt" ]; then
+        python3 -m pip install --no-cache-dir -r requirements-all.txt
+    else
+        echo "Error: requirements-all.txt not found in /opt!"
+        exit 1
+    fi
 
+    echo "Cloning DeepFace repository and installing in editable mode into /opt/deepface..."
+    # Current directory is /opt
+    git clone https://github.com/serengil/deepface.git
+    cd deepface
+    python3 -m pip install -e .
+    cd .. # Return to /opt
+
+    echo "Installing OpenMMLab dependencies (openmim, mmcv, mmdet, mmpose)..."
+    python3 -m pip install --no-cache-dir -U openmim
+
+    echo "Installing OpenMMLab dependencies (mmcv, mmdet, mmpose) with compatible versions..."
+    mim install "mmcv>=2.0.0rc4,<2.2.0" "mmdet>=3.0.0,<3.3.0" "mmpose>=1.1.0"
+    
     echo "Build post-installation complete."
 
 %environment
-    export PYTHONPATH=/opt/facetracker:$PYTHONPATH
+    export PYTHONPATH=/opt:$PYTHONPATH
+    # Set default encoding to UTF-8, good for Python 3 environments
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8 
 
 %runscript
-    echo "Facetracker Apptainer Image. Use 'apptainer exec -nv <image_name.sif> python3 /opt/facetracker/scripts/your_script.py [args]" 
+    echo "Facetracker Apptainer Image. Use 'apptainer exec -nv -B /path/to/your/facetracker_project:/opt <image_name.sif> python3 /opt/scripts/your_script.py [args]" 

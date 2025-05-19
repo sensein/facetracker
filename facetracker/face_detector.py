@@ -5,7 +5,7 @@ import os
 import json
 import cv2
 import numpy as np
-from retinaface import RetinaFace # Use RetinaFace
+from deepface import DeepFace
 import mediapipe as mp             # Keep for FaceLandmarker
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
@@ -16,46 +16,57 @@ from typing import Any, Dict, List, Tuple, Optional # Ensure Optional is importe
 
 class FaceDetector:
     """
-    Detects faces using RetinaFace and extracts detailed landmarks using MediaPipe FaceLandmarker.
+    Detects faces using DeepFace (with a configurable backend)
+    and extracts detailed landmarks using MediaPipe FaceLandmarker.
     """
     def __init__(
         self,
         video_path: str,
         output_dir: str, # Can be used for annotated video or crops
         face_landmarker_model_path: str = "face_landmarker.task", # MP model
-        face_min_confidence: float = 0.9, # Min confidence for RetinaFace detection
+        deepface_backend: str = 'retinaface', # Backend for DeepFace: 'opencv', 'retinaface', 'mtcnn', 'ssd', 'dlib', 'mediapipe'
+        face_min_confidence: float = 0.9, # Min confidence for DeepFace detection
         mp_min_face_presence_confidence: float = 0.5, # MP Landmarker threshold
-        padding_factor: float = 0.2 # Factor to expand RetinaFace bbox for landmark detection crop
+        padding_factor: float = 0.2 # Factor to expand DeepFace bbox for landmark detection crop
     ):
         """
-        Initializes the FaceDetector with RetinaFace and MediaPipe FaceLandmarker.
+        Initializes the FaceDetector with DeepFace and MediaPipe FaceLandmarker.
 
         Args:
             video_path (str): Path to the input video file.
             output_dir (str): Directory for optional output files.
             face_landmarker_model_path (str): Path to the MediaPipe FaceLandmarker model bundle.
-            face_min_confidence (float): Minimum confidence score from RetinaFace to accept the detection.
+            deepface_backend (str): Backend to use for DeepFace detection.
+                                    Options include 'opencv', 'retinaface', 'mtcnn', 'ssd', 'dlib', 'mediapipe'.
+            face_min_confidence (float): Minimum confidence score from DeepFace to accept the detection.
             mp_min_face_presence_confidence (float): Min presence confidence for MP FaceLandmarker
                                                       on the cropped face image.
-            padding_factor (float): How much to expand the RetinaFace bounding box before
+            padding_factor (float): How much to expand the DeepFace bounding box before
                                     feeding the crop to FaceLandmarker.
         """
         self.video_path = video_path
         self.output_dir = output_dir
         self.padding_factor = padding_factor
         self.face_min_confidence = face_min_confidence
+        self.deepface_backend = deepface_backend
 
-        print("Initializing RetinaFace...")
+        print(f"Initializing DeepFace (detector_backend='{self.deepface_backend}')...")
+        # DeepFace models are typically loaded on first use.
+        # We can do a dummy call to trigger model loading if needed,
+        # but often it's fine to let it load on the first frame.
         try:
-            # Eagerly load the RetinaFace model.
-            # RetinaFace library (serengil/retinaface) uses TensorFlow backend
-            # and typically auto-detects GPU if available and configured.
-            RetinaFace.build_model() 
-            print("RetinaFace model pre-loaded.")
+            DeepFace.extract_faces("blank.jpg", detector_backend=self.deepface_backend, enforce_detection=False) # Dummy call
+            print(f"DeepFace ({self.deepface_backend} backend) pre-loaded or already available.")
         except Exception as e:
-            print(f"Warning: Could not pre-load RetinaFace model: {e}. It will be loaded on first use.")
-            # Depending on the library, an error here might mean subsequent calls also fail.
-            # For serengil/retinaface, this call helps avoid delay on first frame.
+            # Create a dummy blank image for pre-loading if blank.jpg doesn't exist
+            try:
+                dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+                cv2.imwrite("blank.jpg", dummy_img)
+                DeepFace.extract_faces("blank.jpg", detector_backend=self.deepface_backend, enforce_detection=False)
+                print(f"DeepFace ({self.deepface_backend} backend) pre-loaded after creating dummy image.")
+                os.remove("blank.jpg") # Clean up dummy image
+            except Exception as e_inner:
+                print(f"Warning: Could not pre-load DeepFace {self.deepface_backend} backend: {e_inner}. It will be loaded on first use.")
 
         print("Initializing MediaPipe FaceLandmarker...")
         self.landmarker = None
@@ -99,46 +110,61 @@ class FaceDetector:
         self, frame: np.ndarray
     ) -> List[Dict[str, Any]]:
         """
-        Detect faces with RetinaFace, then extract landmarks with FaceLandmarker on crops.
+        Detect faces with DeepFace, then extract landmarks with FaceLandmarker on crops.
 
         Args:
             frame (np.ndarray): Input frame (BGR).
 
         Returns:
             List[Dict[str, Any]]: List of detected face data. Each dict contains:
-                'bbox' (from RetinaFace, [x1, y1, x2, y2]),
-                'confidence' (from RetinaFace),
+                'bbox' (from DeepFace, [x1, y1, x2, y2]),
+                'confidence' (from DeepFace),
                 'landmarks' (detailed 478 landmarks from FaceLandmarker, normalized to frame, or None).
         """
         faces_data = []
         frame_height, frame_width = frame.shape[:2]
         
-        # --- Stage 1: RetinaFace Detection --- 
-        # RetinaFace.detect_faces expects BGR numpy array and applies threshold internally.
-        # It returns a dictionary: {'face_1': {'score': S, 'facial_area': [x1,y1,x2,y2], ...}, ...}
-        detected_faces_retina = {}
+        # --- Stage 1: DeepFace Detection ---
+        # DeepFace.extract_faces returns a list of dicts, each with 'facial_area' and 'confidence'.
+        # 'facial_area' is a dict: {'x': X, 'y': Y, 'w': W, 'h': H}
+        # We set enforce_detection=False to avoid exceptions when no faces are found.
+        detected_faces_deepface = []
         try:
-            # The threshold is applied by RetinaFace.detect_faces directly.
-            raw_detections = RetinaFace.detect_faces(frame, threshold=self.face_min_confidence)
-            if isinstance(raw_detections, dict): # Standard output format
-                 detected_faces_retina = raw_detections
-            # If raw_detections is empty or not a dict (e.g. due to error or no faces), loop won't run.
+            # DeepFace expects BGR numpy array.
+            raw_detections = DeepFace.extract_faces(
+                img_path=frame,
+                detector_backend=self.deepface_backend,
+                enforce_detection=False,
+                align=False # We are doing our own alignment/cropping for MediaPipe
+            )
+            # raw_detections is a list of dicts
+            if isinstance(raw_detections, list):
+                detected_faces_deepface = raw_detections
         except Exception as e:
-            print(f"RetinaFace detection failed for a frame: {e}")
-            # detected_faces_retina remains {}
+            print(f"DeepFace detection failed for a frame: {e}")
+            # detected_faces_deepface remains []
 
-        if detected_faces_retina: # Check if dict is not empty
-            for face_key, face_data_retina in detected_faces_retina.items():
-                prob = face_data_retina['score']
-                # Confidence check already done by RetinaFace.detect_faces with its threshold parameter
+        if detected_faces_deepface: # Check if list is not empty
+            for face_data_deepface in detected_faces_deepface:
+                prob = face_data_deepface['confidence']
 
-                # RetinaFace returns 'facial_area' as [x1, y1, x2, y2]
-                box_rf = face_data_retina['facial_area'] 
-                x1, y1, x2, y2 = map(int, box_rf)
+                if prob < self.face_min_confidence:
+                    continue
+
+                # DeepFace returns 'facial_area' as {'x': x, 'y': y, 'w': w, 'h': h}
+                # Convert to [x1, y1, x2, y2]
+                x1 = int(face_data_deepface['facial_area']['x'])
+                y1 = int(face_data_deepface['facial_area']['y'])
+                w = int(face_data_deepface['facial_area']['w'])
+                h = int(face_data_deepface['facial_area']['h'])
+                x2 = x1 + w
+                y2 = y1 + h
+                
+                box_df = [x1, y1, x2, y2]
 
                 # Ensure box coordinates are valid before padding/cropping
                 if x1 >= x2 or y1 >= y2 or x1 < 0 or y1 < 0 or x2 > frame_width or y2 > frame_height:
-                    # print(f"Warning: Skipping invalid RetinaFace box {box_rf}")
+                    # print(f"Warning: Skipping invalid DeepFace box {box_df}")
                     continue
 
                 # Add padding to the bounding box for the landmark crop
@@ -154,13 +180,13 @@ class FaceDetector:
 
                 # Ensure crop coordinates are valid after padding
                 if crop_x1 >= crop_x2 or crop_y1 >= crop_y2:
-                    # print(f"Warning: Skipping invalid padded crop area for box {box_rf}")
+                    # print(f"Warning: Skipping invalid padded crop area for box {box_df}")
                     continue
 
                 face_crop_bgr = frame[crop_y1:crop_y2, crop_x1:crop_x2]
 
                 if face_crop_bgr.size == 0:
-                    # print(f"Warning: Skipping empty face crop for box {box_rf}")
+                    # print(f"Warning: Skipping empty face crop for box {box_df}")
                     continue # Skip if crop is empty
 
                 # --- Stage 2: MediaPipe FaceLandmarker on Crop --- 
@@ -184,11 +210,11 @@ class FaceDetector:
                         # print(f"Warning: FaceLandmarker failed on a crop: {e}")
                         pass # Continue without detailed landmarks if MP fails
 
-                # Store result if RetinaFace detection was good
+                # Store result if DeepFace detection was good enough
                 current_face_data = {
-                    # Bbox from RetinaFace [x1,y1,x2,y2] - ensure they are floats
-                    "bbox": [float(b) for b in box_rf], 
-                    "confidence": float(prob),      # Confidence from RetinaFace
+                    # Bbox from DeepFace [x1,y1,x2,y2] - ensure they are floats
+                    "bbox": [float(b) for b in box_df], 
+                    "confidence": float(prob),      # Confidence from DeepFace
                     "landmarks": detailed_landmarks_transformed # Detailed 478 landmarks (normalized to frame) or None
                 }
                 faces_data.append(current_face_data)
@@ -196,7 +222,7 @@ class FaceDetector:
 
 
     def detect_faces_in_video(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Detect faces (RetinaFace) and landmarks (MediaPipe) in the video."""
+        """Detect faces (DeepFace) and landmarks (MediaPipe) in the video."""
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             raise ValueError(f"Error opening video file: {self.video_path}")
@@ -208,7 +234,7 @@ class FaceDetector:
             print("Warning: Could not determine total frames. Progress bar may be inaccurate.")
             total_frames = None
 
-        pbar = tqdm(total=total_frames, desc="Detecting Faces (RetinaFace+MP)")
+        pbar = tqdm(total=total_frames, desc="Detecting Faces (DeepFace+MP)")
 
         while True:
             ret, frame = cap.read()
@@ -248,7 +274,7 @@ class FaceDetector:
              except Exception as e:
                  print(f"Ignoring generic error closing FaceLandmarker in close: {e}")
          # MTCNN doesn't typically require explicit closing
-         # RetinaFace (TensorFlow backend) also generally doesn't require explicit model closing here.
+         # DeepFace (TensorFlow backend) also generally doesn't require explicit model closing here.
          # TensorFlow session management handles its resources.
 
     def __del__(self):

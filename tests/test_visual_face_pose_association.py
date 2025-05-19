@@ -93,11 +93,50 @@ def draw_results_on_frame(frame_bgr: np.ndarray,
 def main():
     parser = argparse.ArgumentParser(description="Test script for face and pose association visualization.")
     parser.add_argument(
-        "--face_detection_model_path", 
-        type=str, 
-        default=None,
-        help="Path to the face detection model. If None, uses default."
+        "--video_path",
+        type=str,
+        default="tests/friends_s02e09a_1min_slice.mp4",
+        help="Path to the test video file."
     )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="tests/output/",
+        help="Directory to save output files."
+    )
+    # Arguments for FaceDetector (DeepFace + MediaPipe Landmarks)
+    parser.add_argument(
+        "--face_landmarker_model_path", 
+        type=str, 
+        default="face_landmarker.task",
+        help="Path to the MediaPipe FaceLandmarker model (.task file)."
+    )
+    parser.add_argument(
+        "--deepface_backend",
+        type=str,
+        default='retinaface',
+        choices=['opencv', 'retinaface', 'mtcnn', 'ssd', 'dlib', 'mediapipe'],
+        help="Backend detector for DeepFace."
+    )
+    parser.add_argument(
+        "--face_min_confidence",
+        type=float,
+        default=0.7, # Adjusted from 0.9 for potentially better recall with some backends
+        help="Minimum confidence for DeepFace face detections."
+    )
+    parser.add_argument(
+        "--mp_min_face_presence_confidence",
+        type=float,
+        default=0.5,
+        help="Minimum presence confidence for MediaPipe FaceLandmarker."
+    )
+    parser.add_argument(
+        "--padding_factor",
+        type=float,
+        default=0.2,
+        help="Padding factor for face bounding box before landmark extraction."
+    )
+    # Arguments for MMPoseEstimator
     parser.add_argument(
         "--mmpose_model_type", 
         type=str, 
@@ -117,22 +156,10 @@ def main():
         help="Path to the MMPose model checkpoint file."
     )
     parser.add_argument(
-        "--video_path",
-        type=str,
-        default="tests/friends_s02e09a_1min_slice.mp4",
-        help="Path to the test video file."
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="tests/output/",
-        help="Directory to save output files."
-    )
-    parser.add_argument(
         "--device",
         type=str,
         default="cuda",
-        help="Device to use for models ('cuda' or 'cpu')."
+        help="Device to use for MMPose model ('cuda' or 'cpu'). DeepFace manages its own device."
     )
     args = parser.parse_args()
 
@@ -142,9 +169,13 @@ def main():
     # 1. Initialize Components
     print("Initializing components...")
     face_detector = FaceDetector(
-        model_path=args.face_detection_model_path,
-        device=args.device,
-        output_dir=os.path.join(args.output_dir, "face_detector_temp")
+        video_path=args.video_path, # Added for FaceDetector's own reference if needed
+        output_dir=os.path.join(args.output_dir, "face_detector_temp"),
+        face_landmarker_model_path=args.face_landmarker_model_path,
+        deepface_backend=args.deepface_backend,
+        face_min_confidence=args.face_min_confidence,
+        mp_min_face_presence_confidence=args.mp_min_face_presence_confidence,
+        padding_factor=args.padding_factor
     )
     
     mmpose_estimator = MMPoseEstimator(
