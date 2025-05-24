@@ -170,8 +170,26 @@ class PersonAssociator:
             processed_frames_count += 1
             frame_height, frame_width = frame_bgr.shape[:2]
             
-            # Perform pose estimation
-            mmpose_results = self.pose_estimator.estimate_poses(frame_bgr)
+            # Extract face bboxes for this frame to provide to MMPose
+            face_bboxes = []
+            for face_entry in faces_in_frame_list:
+                face_bbox = face_entry["bbox"]  # [x1, y1, x2, y2]
+                face_bboxes.append(face_bbox)
+            
+            # Perform pose estimation with face bboxes to avoid problematic detector
+            try:
+                if face_bboxes:
+                    # Provide face bboxes to MMPose to skip internal person detection
+                    mmpose_results = self.pose_estimator.estimate_poses(frame_bgr, bboxes=face_bboxes)
+                else:
+                    # Fallback to full frame detection if no faces
+                    mmpose_results = self.pose_estimator.estimate_poses(frame_bgr)
+            except RuntimeError as e:
+                if "CUDA error" in str(e):
+                    print(f"CUDA error in pose estimation for frame {frame_idx}, skipping pose estimation for this frame: {e}")
+                    mmpose_results = []
+                else:
+                    raise e
             
             # Process poses and update tracks
             current_poses = []

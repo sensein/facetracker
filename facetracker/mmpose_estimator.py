@@ -4,6 +4,7 @@ import numpy as np
 # from mmpose.apis import PoseEstimator as MMPoseModel # Old import
 from mmpose.apis import MMPoseInferencer # New import for MMPose v1.x
 from typing import List, Dict, Any, Tuple, Optional
+import os
 
 class MMPoseEstimator:
     """
@@ -15,7 +16,8 @@ class MMPoseEstimator:
         pose_model_config: str,
         pose_model_checkpoint: str,
         device: str = 'cuda:0',
-        keypoint_convention: str = 'coco' # e.g., 'coco', 'animalpose', etc.
+        keypoint_convention: str = 'coco', # e.g., 'coco', 'animalpose', etc.
+        detector_device: str = None  # Allow separate device for detector
     ):
         """
         Initializes the MMPoseEstimator with a specific model configuration and checkpoint.
@@ -26,21 +28,62 @@ class MMPoseEstimator:
             device (str): Device to run the model on (e.g., 'cuda:0' or 'cpu').
             keypoint_convention (str): The convention of the keypoints (e.g., 'coco').
                                        This helps in interpreting the output keypoints.
+            detector_device (str): Device for detector (if different from main device). 
+                                  If None, uses same as device.
         """
         print(f"Initializing MMPoseInferencer with config: {pose_model_config} and checkpoint: {pose_model_checkpoint} on device: {device}")
         
-        self.inferencer = MMPoseInferencer(
-            pose2d=pose_model_config, 
-            pose2d_weights=pose_model_checkpoint,
-            device=device  # Use the main device for the inferencer
-        )
+        # If CUDA device specified but we want to handle compatibility issues
+        effective_device = device
+        if detector_device is not None:
+            print(f"Using separate detector device: {detector_device}")
+        elif "cuda" in device:
+            # Check if we should fallback due to CUDA compatibility issues
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    # Test basic CUDA operation
+                    test_tensor = torch.tensor([1.0]).cuda()
+                    test_result = test_tensor + 1
+                    print(f"CUDA test passed on {device}")
+                else:
+                    print(f"CUDA not available, falling back to CPU")
+                    effective_device = "cpu"
+            except Exception as e:
+                print(f"CUDA test failed: {e}, falling back to CPU")
+                effective_device = "cpu"
+        
+        # Set environment variable to potentially help with CUDA compatibility
+        if "cuda" in effective_device:
+            os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+        
+        try:
+            self.inferencer = MMPoseInferencer(
+                pose2d=pose_model_config, 
+                pose2d_weights=pose_model_checkpoint, 
+                device=effective_device  # Use the effective device for the inferencer
+            )
+        except Exception as e:
+            if "cuda" in effective_device and "cuda" not in str(e).lower():
+                print(f"Failed to initialize with {effective_device}, trying CPU: {e}")
+                effective_device = "cpu"
+                self.inferencer = MMPoseInferencer(
+                    pose2d=self.pose_model_config,  # Use stored original path
+                    pose2d_weights=self.pose_model_checkpoint,  # Use stored original path
+                    device="cpu"
+                )
+            else:
+                raise e
             
         self.keypoint_convention = keypoint_convention
-        self.device = device
+        self.device = effective_device
+        # Store original paths for potential CPU fallback
+        self.pose_model_config = pose_model_config
+        self.pose_model_checkpoint = pose_model_checkpoint
         # Input_size can often be inferred or is handled by the model's config, 
         # but if specific preprocessing is needed, it might be relevant.
         # For now, we rely on MMPoseInferencer's internal handling.
-        print(f"MMPoseInferencer initialized for {keypoint_convention} convention.")
+        print(f"MMPoseInferencer initialized for {keypoint_convention} convention on {effective_device}.")
 
     def estimate_poses(
         self, 
@@ -79,8 +122,42 @@ class MMPoseEstimator:
         # as part of the input dict. Let's check its API.
         # According to MMPoseInferencer docs, if bboxes are provided, they should be passed as a list of lists/arrays.
         
-        results_generator = self.inferencer(frame, bboxes=bboxes, return_vis=False, show=False)
-        results = list(results_generator)
+        try:
+            results_generator = self.inferencer(frame, bboxes=bboxes, return_vis=False, show=False)
+            results = list(results_generator)
+        except RuntimeError as e:
+            if "CUDA error" in str(e) and "cuda" in self.device:
+                print(f"CUDA error encountered: {e}")
+                print("Attempting to reinitialize MMPoseInferencer on CPU...")
+                
+                # Reinitialize on CPU
+                try:
+                    # Store original device
+                    original_device = self.device
+                    self.device = "cpu"
+                    
+                    # Get the config and checkpoint from the original inferencer
+                    from mmpose.apis import MMPoseInferencer
+                    
+                    # Reinitialize with CPU
+                    self.inferencer = MMPoseInferencer(
+                        pose2d=self.pose_model_config,  # Use stored original path
+                        pose2d_weights=self.pose_model_checkpoint,  # Use stored original path
+                        device="cpu"
+                    )
+                    
+                    print(f"Successfully reinitialized MMPoseInferencer on CPU")
+                    
+                    # Retry the inference
+                    results_generator = self.inferencer(frame, bboxes=bboxes, return_vis=False, show=False)
+                    results = list(results_generator)
+                    
+                except Exception as cpu_e:
+                    print(f"Failed to reinitialize on CPU: {cpu_e}")
+                    print("Returning empty results for this frame")
+                    return []
+            else:
+                raise e
 
         processed_poses = []
         if results and 'predictions' in results[0]:

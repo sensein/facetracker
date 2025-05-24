@@ -1,10 +1,14 @@
 Bootstrap: docker
-From: nvcr.io/nvidia/tensorflow:24.10-tf2-py3
+# Using a TensorFlow base image that is more likely to have CUDA 12.1 or 12.2
+# nvcr.io/nvidia/tensorflow:23.10-tf2-py3 (Oct 2023) likely has CUDA 12.2
+# Your host driver (550.54.14 for CUDA 12.4) is compatible with CUDA 12.1 & 12.2 runtimes.
+From: nvcr.io/nvidia/tensorflow:23.10-tf2-py3
 
 %help
     Facetracker application container.
-    Installs dependencies from requirements-all.txt, OpenMMLab (mmcv, mmdet, mmpose).
-    Base image uses Python 3.10, TensorFlow 2.16.1, CUDA 12.6.2, cuDNN 9.5.0.
+    Installs dependencies from requirements-all.txt.
+    Installs OpenMMLab (mmcv, mmdet, mmpose) targeting PyTorch 2.1.2 (for CUDA 12.1) and MMCV 2.1.0.
+    Base image (nvcr.io/nvidia/tensorflow:23.10-tf2-py3) uses Python 3.10. Check its TF/CUDA versions.
 
 %files
     # Copy only requirements-all.txt into the image
@@ -13,6 +17,7 @@ From: nvcr.io/nvidia/tensorflow:24.10-tf2-py3
 %post
     echo "Updating package lists and installing system dependencies..."
     apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
         libx11-6 \
         libxext6 \
         git \
@@ -20,16 +25,19 @@ From: nvcr.io/nvidia/tensorflow:24.10-tf2-py3
 
     echo "Updating pip..."
     python3 -m pip install --upgrade pip
-    
-    echo "Setting working directory to /opt and installing application-specific dependencies..."
+
+    echo "Setting working directory to /opt and installing application-specific dependencies from requirements-all.txt..."
     cd /opt
-    # Ensure requirements-all.txt is present from the %files copy
+    # Ensure requirements-all.txt is present and torch/torchvision are NOT pinned there
     if [ -f "requirements-all.txt" ]; then
         python3 -m pip install --no-cache-dir -r requirements-all.txt
     else
         echo "Error: requirements-all.txt not found in /opt!"
         exit 1
     fi
+
+    echo "Installing specific PyTorch, torchvision, torchaudio for CUDA 12.1..."
+    python3 -m pip install --no-cache-dir torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121
 
     echo "Cloning DeepFace repository and installing in editable mode into /opt/deepface..."
     # Current directory is /opt
@@ -38,19 +46,76 @@ From: nvcr.io/nvidia/tensorflow:24.10-tf2-py3
     python3 -m pip install -e .
     cd .. # Return to /opt
 
-    echo "Installing OpenMMLab dependencies (openmim, mmcv, mmdet, mmpose)..."
-    python3 -m pip install --no-cache-dir -U openmim
+    echo "Cleaning pip cache..."
+    python3 -m pip cache purge
 
-    echo "Installing OpenMMLab dependencies (mmcv, mmdet, mmpose) with compatible versions..."
-    mim install "mmcv>=2.0.0rc4,<2.2.0" "mmdet>=3.0.0,<3.3.0" "mmpose>=1.1.0"
-    
+    echo "Explicitly uninstalling any existing mmcv to ensure a clean build..."
+    # The -y flag avoids interactive prompts.
+    # This might fail if mmcv is not installed, which is fine, so we add || true.
+    python3 -m pip uninstall -y mmcv || true
+
+    echo "Setting environment for MMCV compilation (targeting H100 - sm_90)..."
+    # Explicitly set CUDA_HOME and related paths
+    # The base image nvcr.io/nvidia/tensorflow:23.10-tf2-py3 should have CUDA 12.2
+    CUDA_VERSION_DIR="cuda-12.2" # As expected for the base image
+    if [ -d "/usr/local/${CUDA_VERSION_DIR}" ]; then
+        export CUDA_HOME=/usr/local/${CUDA_VERSION_DIR}
+    elif [ -d "/usr/local/cuda" ]; then # Fallback to generic symlink
+        export CUDA_HOME=/usr/local/cuda
+        echo "Warning: Using generic /usr/local/cuda. Specific version ${CUDA_VERSION_DIR} not found."
+    else
+        echo "Error: CUDA_HOME not found. MMCV compilation will likely fail."
+        # Optionally, exit 1 here if CUDA is absolutely critical and not found
+    fi
+
+    if [ -n "${CUDA_HOME}" ]; then
+        export PATH=${CUDA_HOME}/bin:${PATH}
+        export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+        export CPATH=${CUDA_HOME}/include:${CPATH} # For C/C++ headers
+        echo "CUDA_HOME set to: ${CUDA_HOME}"
+        echo "PATH includes: ${CUDA_HOME}/bin"
+        echo "LD_LIBRARY_PATH includes: ${CUDA_HOME}/lib64"
+        # Verify nvcc is available and its version
+        if command -v nvcc &> /dev/null; then
+            echo "nvcc found. Version:"
+            nvcc --version
+        else
+            echo "Error: nvcc not found in PATH after setting CUDA_HOME. Check CUDA installation in base image."
+        fi
+    fi
+
+    export TORCH_CUDA_ARCH_LIST="9.0"
+    export MMCV_WITH_OPS=1 # Ensure MMCV compiles its CUDA extensions
+    # Potentially force cxx11 ABI if there are linking issues, though mmcv 2.1.0 for torch 2.1.x should align.
+    # export _GLIBCXX_USE_CXX11_ABI=1 # or 0, matching PyTorch. PyTorch usually uses 0.
+
+    echo "Installing MMCV (2.1.0) from source for PyTorch 2.1.x (compiled for sm_90) with verbosity..."
+    # Using --force-reinstall to ensure it rebuilds even if a version is found.
+    # --no-cache-dir is still good.
+    python3 -m pip install --no-cache-dir mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.0/index.html --verbose
+
+    echo "Installing MMDetection (pinned to <3.3.0, e.g., 3.2.0 or specific if known) and MMPose..."
+    # The user solution mentioned mmdet-3.3.0, let's try that.
+    # Ensure it's compatible with mmcv 2.1.0
+    python3 -m pip install --no-cache-dir mmdet==3.3.0
+    # Install mmpose - let pip resolve or pin if you know a specific version needed by facetracker
+    python3 -m pip install --no-cache-dir mmpose==1.3.2 # Pinning to previously used version
+
+    # It's good practice to unset build-specific environment variables if they might interfere later,
+    # though for this script structure, it's probably fine.
+    unset TORCH_CUDA_ARCH_LIST
+    unset MMCV_WITH_OPS
+
     echo "Build post-installation complete."
 
 %environment
-    export PYTHONPATH=/opt:$PYTHONPATH
+    export PYTHONPATH=/opt:/opt/deepface:$PYTHONPATH
     # Set default encoding to UTF-8, good for Python 3 environments
     export LANG=C.UTF-8
-    export LC_ALL=C.UTF-8 
+    export LC_ALL=C.UTF-8
+    # For more detailed CUDA error reporting
+    export CUDA_LAUNCH_BLOCKING=1
 
 %runscript
-    echo "Facetracker Apptainer Image. Use 'apptainer exec -nv -B /path/to/your/facetracker_project:/opt <image_name.sif> python3 /opt/scripts/your_script.py [args]" 
+    echo "Facetracker Apptainer Image. Built with PyTorch 2.1.2 (CUDA 12.1) and MMCV 2.1.0."
+    echo "Use 'apptainer exec -nv -B /path/to/your/facetracker_project:/opt <image_name.sif> python3 /opt/scripts/your_script.py [args]"

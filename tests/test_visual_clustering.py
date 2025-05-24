@@ -1,5 +1,5 @@
 import torch # Ensure torch is imported
-from torch.serialization import add_safe_globals # Direct import
+# from torch.serialization import add_safe_globals # Direct import
 import numpy
 import numpy.core.multiarray
 
@@ -39,18 +39,9 @@ if hasattr(numpy, 'dtypes') and hasattr(numpy.dtypes, '__all__'):
             if isinstance(attr, type) and attr not in _globals_to_add_to_torch:
                  _globals_to_add_to_torch.append(attr)
 
-if _globals_to_add_to_torch:
-    add_safe_globals(_globals_to_add_to_torch)
-    # print(f"DEBUG: Added the following globals to torch safe list: {_globals_to_add_to_torch}")
-
-# Add mmengine.logging.history_buffer.HistoryBuffer if available
-try:
-    from mmengine.logging.history_buffer import HistoryBuffer
-    add_safe_globals([HistoryBuffer])
-except ImportError:
-    print("Warning: mmengine.logging.history_buffer.HistoryBuffer not found, not adding to safe globals.")
-except Exception as e:
-    print(f"Warning: Could not add HistoryBuffer to torch safe globals: {e}")
+# if _globals_to_add_to_torch:
+#     add_safe_globals(_globals_to_add_to_torch)
+#     print(f"DEBUG: Added the following globals to torch safe list: {_globals_to_add_to_torch}")
 
 import cv2
 import os

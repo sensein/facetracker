@@ -1,23 +1,25 @@
 import pytest
 import os
-from torch.serialization import add_safe_globals
+# from torch.serialization import add_safe_globals # Removed due to PyTorch 2.x update
 import numpy.core.multiarray
 import numpy as np
 
 # Add numpy's _reconstruct, ndarray, dtype, all dtypes, and scalar to safe globals
-add_safe_globals([numpy.core.multiarray._reconstruct, np.ndarray, np.dtype, numpy.core.multiarray.scalar])
+# add_safe_globals([numpy.core.multiarray._reconstruct, np.ndarray, np.dtype, numpy.core.multiarray.scalar]) # Removed
 # Add all numpy dtypes
-for dtype in [getattr(np, name) for name in dir(np) if isinstance(getattr(np, name), type) and issubclass(getattr(np, name), np.generic)]:
-    add_safe_globals([dtype])
-if hasattr(np, 'dtypes'):
-    for dtype in np.dtypes.__all__:
-        add_safe_globals([getattr(np.dtypes, dtype)])
+# for dtype_name in dir(np):
+#     if isinstance(getattr(np, dtype_name), type) and issubclass(getattr(np, dtype_name), np.generic):
+#         add_safe_globals([getattr(np, dtype_name)]) # Removed
+# if hasattr(np, 'dtypes'):
+#     for dtype_name in np.dtypes.__all__:
+#        add_safe_globals([getattr(np.dtypes, dtype_name)]) # Removed
+
 # Add mmengine.logging.history_buffer.HistoryBuffer
-try:
-    from mmengine.logging.history_buffer import HistoryBuffer
-    add_safe_globals([HistoryBuffer])
-except ImportError:
-    pass
+# try:
+#     from mmengine.logging.history_buffer import HistoryBuffer
+#     add_safe_globals([HistoryBuffer]) # Removed
+# except ImportError:
+#     pass
 
 # Attempt to import mmpose modules and skip test if not available
 try:

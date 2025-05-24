@@ -6,76 +6,50 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import networkx as nx
 import numpy as np
-import torch
-from facenet_pytorch import InceptionResnetV1
+# import torch # No longer directly used here, DeepFace handles its backend
+from deepface import DeepFace
 from scipy.spatial.distance import cdist, cosine
 from tqdm import tqdm
 
 class FaceEmbedder:
-    """Class for generating face embeddings from images."""
+    """Class for generating face embeddings from images using DeepFace."""
 
     def __init__(
         self,
-        model: Optional[InceptionResnetV1] = None,
-        device: Optional[torch.device] = None,
+        model_name: str = "Facenet",
     ) -> None:
         """Initialize the FaceEmbedder.
 
         Args:
-            model: Pre-trained face recognition model.
-            device: Computation device (CPU or GPU).
+            model_name: Name of the model to use within DeepFace (e.g., "VGG-Face", "Facenet").
         """
-        self.device = device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-        self.model = model or InceptionResnetV1(pretrained="vggface2").eval().to(
-            self.device
-        )
+        self.model_name = model_name
+        try:
+            _ = DeepFace.represent(np.zeros((10, 10, 3), dtype=np.uint8), model_name=self.model_name, enforce_detection=False)
+            print(f"DeepFace model '{self.model_name}' loaded successfully.")
+        except Exception as e:
+            print(f"Error loading DeepFace model '{self.model_name}': {e}")
+            raise
 
-    def load_image(self, image_path: str) -> torch.Tensor:
-        """Load an image from disk and convert it to a tensor."""
+    def load_image(self, image_path: str) -> np.ndarray:
+        """Load an image from disk."""
         image = cv2.imread(image_path)
         if image is None:
             raise ValueError(f"Error loading image: {image_path}")
+        return image
 
-        # Optionally preprocess image if needed (resize, etc.)
-        face_tensor = self.preprocess_face(image)
-        return face_tensor
-
-    def preprocess_face(self, face_image: np.ndarray) -> torch.Tensor:
-        """Preprocess the face image for embedding extraction."""
-        face_image = cv2.resize(
-            face_image, (160, 160)
-        )  # Resize to 160x160 pixels if required
-        face_tensor = (
-            torch.tensor(face_image)
-            .permute(2, 0, 1)
-            .float()
-            .unsqueeze(0)
-            .to(self.device)
-        )
-        face_tensor = (face_tensor - 127.5) / 128.0  # Normalize
-        return face_tensor
+    def preprocess_face(self, face_image: np.ndarray) -> np.ndarray:
+        """Preprocess the face image for embedding extraction.
+        With DeepFace, this is mostly handled internally, but if specific resizing
+        is needed before passing to DeepFace, it can be done here.
+        For now, we'll assume DeepFace's internal preprocessing is sufficient.
+        """
+        return face_image
 
     def get_face_embeddings(
         self, selected_frames_by_scene: Dict[str, List[Dict[str, Any]]], image_dir: str
     ) -> List[Dict[str, Any]]:
-        """Get embeddings for each cropped face image, carrying along associated data.
-
-        Args:
-            selected_frames_by_scene: Output from FrameSelector, structured as 
-                                     Dict[scene_id, List[unique_track_data]], where
-                                     unique_track_data is Dict["unique_track_id", "top_frames"].
-                                     Each item in "top_frames" has "image_path", 
-                                     "face_mesh", "full_body_pose", etc.
-            image_dir: Directory containing the cropped face images.
-
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries, one for each unique track.
-                                  Each dict contains "unique_track_id", "scene_id", and 
-                                  "frames_data" (a list of dicts with "frame_idx", 
-                                  "embedding", "image_path", "face_mesh", "full_body_pose").
-        """
+        """Get embeddings for each cropped face image using DeepFace."""
         all_tracks_data_with_embeddings = []
 
         # Calculate total number of top_frames to process for tqdm
@@ -97,28 +71,41 @@ class FaceEmbedder:
                             image_dir, frame_info["image_path"]
                         )
                         try:
-                            face_tensor = self.load_image(image_path_full)
-                            with torch.no_grad():
-                                embedding = self.model(face_tensor).cpu().numpy()
+                            embedding_results = DeepFace.represent(
+                                img_path=image_path_full,
+                                model_name=self.model_name,
+                                enforce_detection=False,
+                                detector_backend='skip'
+                            )
+                            if isinstance(embedding_results, list) and len(embedding_results) > 0 and 'embedding' in embedding_results[0]:
+                                embedding = np.array(embedding_results[0]['embedding'])
+                            else:
+                                print(f"Warning: Could not extract embedding for {image_path_full}. Result: {embedding_results}")
+                                pbar.update(1)
+                                continue
                         except ValueError as e:
                             print(f"Skipping embedding for {image_path_full} due to load error: {e}")
                             pbar.update(1)
-                            continue # Skip this frame if image can't be loaded
+                            continue
+                        except Exception as e:
+                            print(f"Skipping embedding for {image_path_full} due to DeepFace error: {e}")
+                            pbar.update(1)
+                            continue
                             
                         current_track_frames_data.append(
                             {
                                 "frame_idx": frame_info["frame_idx"],
                                 "embedding": embedding,
                                 "image_path": frame_info["image_path"],
-                                "face_mesh": frame_info.get("face_mesh"), # Pass through
-                                "full_body_pose": frame_info.get("full_body_pose"), # Pass through
-                                "face_coord": frame_info.get("face_coord"), # Pass through, might be useful
-                                "total_score": frame_info.get("total_score") # Pass through quality score
+                                "face_mesh": frame_info.get("face_mesh"),
+                                "full_body_pose": frame_info.get("full_body_pose"),
+                                "face_coord": frame_info.get("face_coord"),
+                                "total_score": frame_info.get("total_score")
                             }
                         )
                         pbar.update(1)
                     
-                    if current_track_frames_data: # Only add track if it has successfully processed frames
+                    if current_track_frames_data:
                         all_tracks_data_with_embeddings.append(
                             {
                                 "unique_track_id": track_unique_id,
@@ -160,7 +147,7 @@ class FaceClusterer:
             The constructed graph and a flat list of node_attributes (one per embedding/frame).
         """
         G = nx.Graph()
-        node_attributes_list = [] # Flat list, each item corresponds to a node (an embedding)
+        node_attributes_list = []
         node_idx_counter = 0
 
         for track_data in all_tracks_data:
@@ -171,19 +158,16 @@ class FaceClusterer:
                     "node_id": node_idx_counter,
                     "unique_track_id": unique_track_id,
                     "scene_id": scene_id,
-                    **frame_embedding_data # Merges all keys from frame_embedding_data
+                    **frame_embedding_data
                 }
                 node_attributes_list.append(node_attributes)
                 
                 G.add_node(
                     node_idx_counter,
-                    attr_dict=node_attributes # Store all attributes directly on the node
+                    attr_dict=node_attributes
                 )
                 node_idx_counter += 1
         
-        # Add edges based on similarity between embeddings of different frames
-        # Note: This compares every frame embedding with every other frame embedding.
-        # For N total frame embeddings, this is O(N^2) comparisons.
         with tqdm(
             total=len(node_attributes_list) * (len(node_attributes_list) - 1) // 2,
             desc="Building Clustering Graph",
@@ -191,7 +175,6 @@ class FaceClusterer:
         ) as pbar:
             for i in range(len(node_attributes_list)):
                 for j in range(i + 1, len(node_attributes_list)):
-                    # embedding is expected to be a numpy array, ensure it's flattened if multi-dimensional.
                     embedding_i = node_attributes_list[i]["embedding"].flatten()
                     embedding_j = node_attributes_list[j]["embedding"].flatten()
                     
@@ -264,9 +247,6 @@ class FaceClusterer:
             if cluster_label not in final_clusters:
                 final_clusters[cluster_label] = []
             for node_id in node_ids_in_cluster:
-                # Find the node_attributes by node_id
-                # This assumes node_attributes_list is indexed by node_id if node_id starts from 0
-                # Or, create a map if node_ids are not strictly sequential from 0
                 node_attr = next((attr for attr in node_attributes_list if attr["node_id"] == node_id), None)
                 if node_attr:
                     final_clusters[cluster_label].append(node_attr)
@@ -299,17 +279,12 @@ class FaceClusterer:
             print("No nodes in graph to cluster. Returning empty clusters.")
             return {}
             
-        node_id_to_cluster_label = self.apply_chinese_whispers(G) # Returns {node_id: cluster_label}
+        node_id_to_cluster_label = self.apply_chinese_whispers(G)
 
-        # Group node_ids by their cluster_label
         clusters_by_label: Dict[int, List[int]] = {}
         for node_id, label in node_id_to_cluster_label.items():
             if label not in clusters_by_label:
                 clusters_by_label[label] = []
             clusters_by_label[label].append(node_id)
 
-        # The old `consolidate_clusters` was more complex due to a different input structure.
-        # Now, it primarily re-maps node_ids back to their full data.
-        # The name "consolidate_clusters" might be a bit strong for its new role, 
-        # but we keep it for consistency unless a major rewrite of that part is done.
         return self.consolidate_clusters(clusters_by_label, node_attributes_list)
